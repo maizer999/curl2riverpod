@@ -15,9 +15,9 @@ def to_camel_case(text):
     pascal = clean_to_pascal(text)
     return pascal[0].lower() + pascal[1:]
 
-def extract_feature_and_endpoint(curl_str):
+def extract_feature_and_endpoint_from_url(curl_str):
     if not curl_str or "curl" not in curl_str.lower():
-        return "BerthShifting", "ApiEndPoints.berthShifting"
+        return "BerthShifting"
         
     url_match = re.search(r'(https?://[^\s\'"]+)', curl_str)
     if url_match:
@@ -25,16 +25,18 @@ def extract_feature_and_endpoint(curl_str):
         segments = [seg for seg in url.split('/') if seg and not seg.startswith('http')]
         
         if segments:
+            # Safely drop trailing pagination keywords
+            if segments[-1].lower() == 'pagination' and len(segments) > 1:
+                segments.pop()
+                
             if segments[-1].lower() == 'crn' and len(segments) > 1:
                 target_segment = segments[-2]
             else:
                 target_segment = segments[-1]
                 
-            pascal_name = clean_to_pascal(target_segment)
-            camel_variable = pascal_name[0].lower() + pascal_name[1:]
-            return pascal_name, f"ApiEndPoints.{camel_variable}"
+            return clean_to_pascal(target_segment)
             
-    return "BerthShifting", "ApiEndPoints.berthShifting"
+    return "BerthShifting"
 
 def get_dart_type(value, key, feature_name):
     if value is None:
@@ -53,18 +55,21 @@ def get_dart_type(value, key, feature_name):
         return f"{feature_name}{key.capitalize()}?"
     return "dynamic"
 
-def process_generation(curl_command, raw_json):
-    inferred_feature, endpoint_variable = extract_feature_and_endpoint(curl_command.strip())
-    
+def process_generation(raw_feature_name, raw_json):
+    if not raw_feature_name.strip():
+        messagebox.showerror("Error", "Feature Name cannot be empty.")
+        return
+
     try:
         data = json.loads(raw_json.strip())
     except Exception as e:
         messagebox.showerror("JSON Error", f"Invalid Output JSON format:\n{str(e)}")
         return
 
-    feature_name = inferred_feature
+    feature_name = clean_to_pascal(raw_feature_name.strip())
     snake_name = camel_to_snake(feature_name)
     camel_name = to_camel_case(feature_name)
+    endpoint_variable = f"ApiEndPoints.{camel_name}"
     
     # -------------------------------------------------------------
     # SETUP DIRECTORIES STRUCTURE
@@ -77,12 +82,11 @@ def process_generation(curl_command, raw_json):
     notifiers_dir = os.path.join(feature_root_dir, "notifiers")
 
     # -------------------------------------------------------------
-    # 1. MODEL CODE (FIXED: ESCAPED F-STRING LITERALS)
+    # 1. MODEL CODE
     # -------------------------------------------------------------
     model_code = f"import 'package:dart_mappable/dart_mappable.dart';\n\n"
     model_code += f"part '{snake_name}_model.mapper.dart';\n\n"
     
-    # --- RESPONSE CLASS ---
     model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}Response with {feature_name}ResponseMappable {{\n"
     model_code += "  final int responseCode;\n  final String responseMessage;\n\n"
     model_code += f"  @MappableField(key: \"data\")\n  final {feature_name}Data? {camel_name}Data;\n\n"
@@ -94,7 +98,6 @@ def process_generation(curl_command, raw_json):
     elif not isinstance(data_obj, dict):
         data_obj = {}
 
-    # --- DATA CLASS ---
     model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}Data with {feature_name}DataMappable {{\n"
     model_code += f"  @MappableField(key: \"content\")\n  final List<{feature_name}Content>? {camel_name}Content;\n"
     model_code += f"  @MappableField(key: \"pageable\")\n  final {feature_name}Pageable? {camel_name}Pageable;\n"
@@ -111,10 +114,8 @@ def process_generation(curl_command, raw_json):
             model_code += f"    this.{k},\n"
         model_code += "  });\n}\n\n"
     else:
-        # Fixed: Double curly braces needed inside f-string for literal '{}'
         model_code += f"\n  {feature_name}Data();\n}}\n\n"
     
-    # --- CONTENT CLASS ---
     content_list = data_obj.get("content", []) if isinstance(data_obj, dict) else []
     content_obj = {}
     if isinstance(content_list, list) and len(content_list) > 0:
@@ -123,16 +124,14 @@ def process_generation(curl_command, raw_json):
     model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}Content with {feature_name}ContentMappable {{\n"
     if content_obj:
         for k, v in content_obj.items():
-            model_code += f"  final {get_dart_type(v, k, feature_name)} {k};\n"
+            f"  final {get_dart_type(v, k, feature_name)} {k};\n"
         model_code += f"\n  {feature_name}Content({{\n"
         for k in content_obj.keys():
             model_code += f"    this.{k},\n"
         model_code += "  });\n}\n\n"
     else:
-        # Fixed: Double curly braces needed inside f-string for literal '{}'
         model_code += f"\n  {feature_name}Content();\n}}\n\n"
     
-    # --- PAGEABLE CLASS ---
     pageable_obj = data_obj.get("pageable", {}) if isinstance(data_obj, dict) else {}
     if not isinstance(pageable_obj, dict): pageable_obj = {}
     
@@ -148,7 +147,6 @@ def process_generation(curl_command, raw_json):
             model_code += f"    this.{k},\n"
         model_code += "  });\n}"
     else:
-        # Fixed: Double curly braces needed inside f-string for literal '{}'
         model_code += f"\n  {feature_name}Pageable();\n}}"
 
     # -------------------------------------------------------------
@@ -267,21 +265,46 @@ final __CAMEL_NAME__ListNotifierProvider = AsyncNotifierProvider.autoDispose<
     except Exception as e:
         messagebox.showerror("File Error", f"Could not create folder architecture:\n{str(e)}")
 
+
 # --- UI Layout ---
 root = tk.Tk()
 root.title("Mawani Structured Architecture Folder Generator")
-root.geometry("650x650")
+root.geometry("650x750")
 
 main_frame = ttk.Frame(root, padding="15")
 main_frame.pack(fill=tk.BOTH, expand=True)
 
+# 1. Curl Input Box
 ttk.Label(main_frame, text="1. Paste Your Curl Command String:", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(0, 2))
-text_curl = tk.Text(main_frame, height=8, font=("Courier", 10), wrap=tk.WORD, borderwidth=2, relief="groove")
-text_curl.pack(fill=tk.X, pady=(0, 15))
-text_curl.insert("1.0", "curl --location 'https://qapigw.tabadul.sa/tabadul/pmis/BerthManagement/v2/berth-shifting/crn?crn=20250226001943'")
+text_curl = tk.Text(main_frame, height=6, font=("Courier", 10), wrap=tk.WORD, borderwidth=2, relief="groove")
+text_curl.pack(fill=tk.X, pady=(0, 10))
+text_curl.insert("1.0", "curl --location 'https://q-pmis2.tabadul.sa/api-gateway/tugspilot/resource-master?page=0&size=10&search=&_=1779114543696'")
 
-ttk.Label(main_frame, text="2. Paste JSON Output Data Payload Here:", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(0, 2))
-text_json = tk.Text(main_frame, height=18, font=("Courier", 10), wrap=tk.WORD, borderwidth=2, relief="groove")
+# 2. Feature Class Name Layout (Horizontal Pack Frame)
+ttk.Label(main_frame, text="2. Feature Class Name (Type or click generate from URL):", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(5, 2))
+
+name_frame = ttk.Frame(main_frame)
+name_frame.pack(fill=tk.X, pady=(0, 15))
+
+entry_custom_name = ttk.Entry(name_frame, font=("Helvetica", 11))
+entry_custom_name.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+
+def on_click_parse_name():
+    curl_content = text_curl.get("1.0", tk.END).strip()
+    predicted_pascal = extract_feature_and_endpoint_from_url(curl_content)
+    
+    entry_custom_name.delete(0, tk.END)
+    entry_custom_name.insert(0, predicted_pascal)
+
+btn_parse_name = ttk.Button(name_frame, text="🔍 Parse from URL", command=on_click_parse_name)
+btn_parse_name.pack(side=tk.RIGHT)
+
+# Initial Pre-fill triggering to make the app look complete on launch
+on_click_parse_name()
+
+# 3. Payload JSON Input Box
+ttk.Label(main_frame, text="3. Paste JSON Output Data Payload Here:", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(0, 2))
+text_json = tk.Text(main_frame, height=14, font=("Courier", 10), wrap=tk.WORD, borderwidth=2, relief="groove")
 text_json.pack(fill=tk.BOTH, expand=True, pady=(0, 20))
 
 dummy_json = '{\n  "responseCode": 200,\n  "responseMessage": "Success",\n  "data": {\n    "content": [],\n    "pageable": {}\n  }\n}'
@@ -289,11 +312,11 @@ text_json.insert("1.0", dummy_json)
 
 def on_generate():
     process_generation(
-        curl_command=text_curl.get("1.0", tk.END),
+        raw_feature_name=entry_custom_name.get(),
         raw_json=text_json.get("1.0", tk.END)
     )
 
-btn_generate = ttk.Button(main_frame, text="🚀 Generate Data", command=on_generate)
+btn_generate = ttk.Button(main_frame, text="🚀 Generate Data Architecture", command=on_generate)
 btn_generate.pack(fill=tk.X, ipady=10)
 
 root.mainloop()
