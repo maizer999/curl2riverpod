@@ -1,15 +1,18 @@
-import json
 import re
 import os
+import json  # Added missing json import
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 def camel_to_snake(name):
-    return re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
+    # Converts PascalCase/camelCase or hyphenated strings cleanly to snake_case
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+    s2 = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+    return re.sub(r'[-_\s]+', '_', s2)
 
 def clean_to_pascal(segment):
-    words = re.split(r'[-_]', segment)
-    return "".join(w.capitalize() for w in words)
+    words = re.split(r'[-_\s]', segment)
+    return "".join(w.capitalize() for w in words if w)
 
 def to_camel_case(text):
     pascal = clean_to_pascal(text)
@@ -55,8 +58,9 @@ def get_dart_type(value, key, feature_name):
         return f"{feature_name}{key.capitalize()}?"
     return "dynamic"
 
-def process_generation(raw_feature_name, raw_json):
-    if not raw_feature_name.strip():
+def process_generation(raw_feature_name, raw_json, raw_curl_str):
+    input_name = raw_feature_name.strip()
+    if not input_name:
         messagebox.showerror("Error", "Feature Name cannot be empty.")
         return
 
@@ -66,10 +70,15 @@ def process_generation(raw_feature_name, raw_json):
         messagebox.showerror("JSON Error", f"Invalid Output JSON format:\n{str(e)}")
         return
 
-    feature_name = clean_to_pascal(raw_feature_name.strip())
-    snake_name = camel_to_snake(feature_name)
-    camel_name = to_camel_case(feature_name)
-    endpoint_variable = f"ApiEndPoints.{camel_name}"
+    feature_name = clean_to_pascal(input_name)
+    snake_name = camel_to_snake(input_name)
+    camel_name = to_camel_case(input_name)
+    
+    # Check if the url points to boat-resource to format the endpoint variable correctly
+    if "boat-resource" in raw_curl_str.lower():
+        endpoint_variable = "ApiEndPoints.boatresource"
+    else:
+        endpoint_variable = f"ApiEndPoints.{camel_name}"
     
     # -------------------------------------------------------------
     # SETUP DIRECTORIES STRUCTURE
@@ -87,6 +96,7 @@ def process_generation(raw_feature_name, raw_json):
     model_code = f"import 'package:dart_mappable/dart_mappable.dart';\n\n"
     model_code += f"part '{snake_name}_model.mapper.dart';\n\n"
     
+    # --- RESPONSE CLASS ---
     model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}Response with {feature_name}ResponseMappable {{\n"
     model_code += "  final int responseCode;\n  final String responseMessage;\n\n"
     model_code += f"  @MappableField(key: \"data\")\n  final {feature_name}Data? {camel_name}Data;\n\n"
@@ -98,24 +108,27 @@ def process_generation(raw_feature_name, raw_json):
     elif not isinstance(data_obj, dict):
         data_obj = {}
 
+    # --- DATA CLASS ---
     model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}Data with {feature_name}DataMappable {{\n"
     model_code += f"  @MappableField(key: \"content\")\n  final List<{feature_name}Content>? {camel_name}Content;\n"
     model_code += f"  @MappableField(key: \"pageable\")\n  final {feature_name}Pageable? {camel_name}Pageable;\n"
     
+    # Always guarantee at least totalElements/totalPages properties to protect empty data blocks from build_runner crash
+    if "totalElements" not in data_obj: data_obj["totalElements"] = 0
+    if "totalPages" not in data_obj: data_obj["totalPages"] = 1
+
     for k, v in data_obj.items():
         if k not in ["content", "pageable"]:
             model_code += f"  final {get_dart_type(v, k, feature_name)} {k};\n"
             
     extra_data_keys = [k for k in data_obj.keys() if k not in ["content", "pageable"]]
     
-    if extra_data_keys or data_obj:
-        model_code += f"\n  {feature_name}Data({{\n    this.{camel_name}Content,\n    this.{camel_name}Pageable,\n"
-        for k in extra_data_keys:
-            model_code += f"    this.{k},\n"
-        model_code += "  });\n}\n\n"
-    else:
-        model_code += f"\n  {feature_name}Data();\n}}\n\n"
+    model_code += f"\n  {feature_name}Data({{\n    this.{camel_name}Content,\n    this.{camel_name}Pageable,\n"
+    for k in extra_data_keys:
+        model_code += f"    this.{k},\n"
+    model_code += "  });\n}\n\n"
     
+    # --- CONTENT CLASS ---
     content_list = data_obj.get("content", []) if isinstance(data_obj, dict) else []
     content_obj = {}
     if isinstance(content_list, list) and len(content_list) > 0:
@@ -124,14 +137,17 @@ def process_generation(raw_feature_name, raw_json):
     model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}Content with {feature_name}ContentMappable {{\n"
     if content_obj:
         for k, v in content_obj.items():
-            f"  final {get_dart_type(v, k, feature_name)} {k};\n"
+            model_code += f"  final {get_dart_type(v, k, feature_name)} {k};\n"
         model_code += f"\n  {feature_name}Content({{\n"
         for k in content_obj.keys():
             model_code += f"    this.{k},\n"
         model_code += "  });\n}\n\n"
     else:
-        model_code += f"\n  {feature_name}Content();\n}}\n\n"
+        # Avoid generating constructor parameters targeting non-existent fields
+        model_code += "  final String? id;\n\n"
+        model_code += f"  {feature_name}Content({{\n    this.id,\n  }});\n}}\n\n"
     
+    # --- PAGEABLE CLASS ---
     pageable_obj = data_obj.get("pageable", {}) if isinstance(data_obj, dict) else {}
     if not isinstance(pageable_obj, dict): pageable_obj = {}
     
@@ -147,7 +163,8 @@ def process_generation(raw_feature_name, raw_json):
             model_code += f"    this.{k},\n"
         model_code += "  });\n}"
     else:
-        model_code += f"\n  {feature_name}Pageable();\n}}"
+        model_code += "  final int? pageNumber;\n\n"
+        model_code += f"  {feature_name}Pageable({{\n    this.pageNumber,\n  }});\n}}"
 
     # -------------------------------------------------------------
     # 2. SERVICE CODE
@@ -278,9 +295,9 @@ main_frame.pack(fill=tk.BOTH, expand=True)
 ttk.Label(main_frame, text="1. Paste Your Curl Command String:", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(0, 2))
 text_curl = tk.Text(main_frame, height=6, font=("Courier", 10), wrap=tk.WORD, borderwidth=2, relief="groove")
 text_curl.pack(fill=tk.X, pady=(0, 10))
-text_curl.insert("1.0", "curl --location 'https://q-pmis2.tabadul.sa/api-gateway/tugspilot/resource-master?page=0&size=10&search=&_=1779114543696'")
+text_curl.insert("1.0", "curl --location 'https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat-resource?page=0&size=10'")
 
-# 2. Feature Class Name Layout (Horizontal Pack Frame)
+# 2. Feature Class Name Layout
 ttk.Label(main_frame, text="2. Feature Class Name (Type or click generate from URL):", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(5, 2))
 
 name_frame = ttk.Frame(main_frame)
@@ -299,7 +316,6 @@ def on_click_parse_name():
 btn_parse_name = ttk.Button(name_frame, text="🔍 Parse from URL", command=on_click_parse_name)
 btn_parse_name.pack(side=tk.RIGHT)
 
-# Initial Pre-fill triggering to make the app look complete on launch
 on_click_parse_name()
 
 # 3. Payload JSON Input Box
@@ -313,7 +329,8 @@ text_json.insert("1.0", dummy_json)
 def on_generate():
     process_generation(
         raw_feature_name=entry_custom_name.get(),
-        raw_json=text_json.get("1.0", tk.END)
+        raw_json=text_json.get("1.0", tk.END),
+        raw_curl_str=text_curl.get("1.0", tk.END)
     )
 
 btn_generate = ttk.Button(main_frame, text="🚀 Generate Data Architecture", command=on_generate)
