@@ -20,12 +20,12 @@ def to_camel_case(text):
 
 def extract_feature_and_endpoint_from_url(curl_str):
     if not curl_str or "curl" not in curl_str.lower():
-        return "BerthShifting"
+        return "BerthShifting", "https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat-resource"
         
     url_match = re.search(r'(https?://[^\s\'"]+)', curl_str)
     if url_match:
-        url = url_match.group(1).split('?')[0] 
-        segments = [seg for seg in url.split('/') if seg and not seg.startswith('http')]
+        full_url = url_match.group(1).split('?')[0] 
+        segments = [seg for seg in full_url.split('/') if seg and not seg.startswith('http')]
         
         if segments:
             # Safely drop trailing pagination keywords
@@ -37,9 +37,9 @@ def extract_feature_and_endpoint_from_url(curl_str):
             else:
                 target_segment = segments[-1]
                 
-            return clean_to_pascal(target_segment)
+            return clean_to_pascal(target_segment), full_url
             
-    return "BerthShifting"
+    return "BerthShifting", "https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat-resource"
 
 def get_dart_type(value, key, feature_name):
     if value is None:
@@ -74,11 +74,9 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
     snake_name = camel_to_snake(input_name)
     camel_name = to_camel_case(input_name)
     
-    # Check if the url points to boat-resource to format the endpoint variable correctly
-    if "boat-resource" in raw_curl_str.lower():
-        endpoint_variable = "ApiEndPoints.boatresource"
-    else:
-        endpoint_variable = f"ApiEndPoints.{camel_name}"
+    # Extract the full clean URL from the curl string
+    _, full_url = extract_feature_and_endpoint_from_url(raw_curl_str)
+    endpoint_variable = f"'{full_url}'"
     
     # -------------------------------------------------------------
     # SETUP DIRECTORIES STRUCTURE
@@ -308,7 +306,7 @@ entry_custom_name.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
 def on_click_parse_name():
     curl_content = text_curl.get("1.0", tk.END).strip()
-    predicted_pascal = extract_feature_and_endpoint_from_url(curl_content)
+    predicted_pascal, _ = extract_feature_and_endpoint_from_url(curl_content)
     
     entry_custom_name.delete(0, tk.END)
     entry_custom_name.insert(0, predicted_pascal)
