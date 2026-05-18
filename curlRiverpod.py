@@ -1,11 +1,10 @@
 import re
 import os
-import json  # Added missing json import
+import json
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 def camel_to_snake(name):
-    # Converts PascalCase/camelCase or hyphenated strings cleanly to snake_case
     s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
     s2 = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
     return re.sub(r'[-_\s]+', '_', s2)
@@ -19,27 +18,31 @@ def to_camel_case(text):
     return pascal[0].lower() + pascal[1:]
 
 def extract_feature_and_endpoint_from_url(curl_str):
-    if not curl_str or "curl" not in curl_str.lower():
-        return "BerthShifting", "https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat-resource"
+    if not curl_str:
+        return "VesselTimeStamp", "https://qapigw.tabadul.sa/tabadul/pmis2/vesselvoyage/v2/vessel-time-stamp/pagination"
         
+    # Extract the absolute URL from the curl string (ignores trailing query parameters)
     url_match = re.search(r'(https?://[^\s\'"]+)', curl_str)
     if url_match:
         full_url = url_match.group(1).split('?')[0] 
+        # Split URL into path segments
         segments = [seg for seg in full_url.split('/') if seg and not seg.startswith('http')]
         
         if segments:
-            # Safely drop trailing pagination keywords
-            if segments[-1].lower() == 'pagination' and len(segments) > 1:
+            # Clean up trailing action endpoints safely using a loop filter
+            ignored_endpoints = ['pagination', 'crn', 'list', 'search', 'filter']
+            while segments and segments[-1].lower() in ignored_endpoints:
                 segments.pop()
-                
-            if segments[-1].lower() == 'crn' and len(segments) > 1:
-                target_segment = segments[-2]
-            else:
-                target_segment = segments[-1]
-                
-            return clean_to_pascal(target_segment), full_url
             
-    return "BerthShifting", "https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat-resource"
+            if segments:
+                target_segment = segments[-1]
+                # If the last segment is a version descriptor (like v1, v2), grab the preceding segment
+                if re.match(r'^v\d+$', target_segment.lower()) and len(segments) > 1:
+                    target_segment = segments[-2]
+                    
+                return clean_to_pascal(target_segment), full_url
+                
+    return "VesselTimeStamp", "https://qapigw.tabadul.sa/tabadul/pmis2/vesselvoyage/v2/vessel-time-stamp/pagination"
 
 def get_dart_type(value, key, feature_name):
     if value is None:
@@ -74,7 +77,6 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
     snake_name = camel_to_snake(input_name)
     camel_name = to_camel_case(input_name)
     
-    # Extract the full clean URL from the curl string
     _, full_url = extract_feature_and_endpoint_from_url(raw_curl_str)
     endpoint_variable = f"'{full_url}'"
     
@@ -87,6 +89,7 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
     models_dir = os.path.join(feature_root_dir, "models")
     services_dir = os.path.join(feature_root_dir, "services")
     notifiers_dir = os.path.join(feature_root_dir, "notifiers")
+    views_dir = os.path.join(feature_root_dir, "views")
 
     # -------------------------------------------------------------
     # 1. MODEL CODE
@@ -94,7 +97,6 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
     model_code = f"import 'package:dart_mappable/dart_mappable.dart';\n\n"
     model_code += f"part '{snake_name}_model.mapper.dart';\n\n"
     
-    # --- RESPONSE CLASS ---
     model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}Response with {feature_name}ResponseMappable {{\n"
     model_code += "  final int responseCode;\n  final String responseMessage;\n\n"
     model_code += f"  @MappableField(key: \"data\")\n  final {feature_name}Data? {camel_name}Data;\n\n"
@@ -106,12 +108,10 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
     elif not isinstance(data_obj, dict):
         data_obj = {}
 
-    # --- DATA CLASS ---
     model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}Data with {feature_name}DataMappable {{\n"
     model_code += f"  @MappableField(key: \"content\")\n  final List<{feature_name}Content>? {camel_name}Content;\n"
     model_code += f"  @MappableField(key: \"pageable\")\n  final {feature_name}Pageable? {camel_name}Pageable;\n"
     
-    # Always guarantee at least totalElements/totalPages properties to protect empty data blocks from build_runner crash
     if "totalElements" not in data_obj: data_obj["totalElements"] = 0
     if "totalPages" not in data_obj: data_obj["totalPages"] = 1
 
@@ -126,7 +126,6 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
         model_code += f"    this.{k},\n"
     model_code += "  });\n}\n\n"
     
-    # --- CONTENT CLASS ---
     content_list = data_obj.get("content", []) if isinstance(data_obj, dict) else []
     content_obj = {}
     if isinstance(content_list, list) and len(content_list) > 0:
@@ -141,11 +140,9 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
             model_code += f"    this.{k},\n"
         model_code += "  });\n}\n\n"
     else:
-        # Avoid generating constructor parameters targeting non-existent fields
         model_code += "  final String? id;\n\n"
         model_code += f"  {feature_name}Content({{\n    this.id,\n  }});\n}}\n\n"
     
-    # --- PAGEABLE CLASS ---
     pageable_obj = data_obj.get("pageable", {}) if isinstance(data_obj, dict) else {}
     if not isinstance(pageable_obj, dict): pageable_obj = {}
     
@@ -165,7 +162,7 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
         model_code += f"  {feature_name}Pageable({{\n    this.pageNumber,\n  }});\n}}"
 
     # -------------------------------------------------------------
-    # 2. SERVICE CODE (With final params update)
+    # 2. SERVICE CODE
     # -------------------------------------------------------------
     service_template = """import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -258,12 +255,95 @@ final __CAMEL_NAME__ListNotifierProvider = AsyncNotifierProvider.autoDispose<
     provider_code = provider_template.replace("__FEATURE_NAME__", feature_name).replace("__SNAKE_NAME__", snake_name).replace("__CAMEL_NAME__", camel_name)
 
     # -------------------------------------------------------------
+    # 4. VIEW / UI CODE GENERATION
+    # -------------------------------------------------------------
+    dynamic_ui_fields = ""
+    if content_obj:
+        for k in content_obj.keys():
+            if k == "id": continue
+            readable_label = k.replace('_', ' ').title()
+            dynamic_ui_fields += f"                        LabelValue(\n                            label: \"{readable_label}\",\n                            value: data.{k} ?? \"-\"),\n"
+    else:
+        dynamic_ui_fields = f"                        LabelValue(\n                            label: \"Title\",\n                            value: \"-\"),\n"
+
+    view_template = """import 'package:auto_route/auto_route.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mawani_pmis/features/common/widgets/dynamic_common_card.dart';
+import 'package:riverpod_infinite_scroll_pagination/riverpod_infinite_scroll_pagination.dart';
+import 'package:mawani_pmis/features/common/widgets/common_background.dart';
+import 'package:mawani_pmis/features/common/widgets/common_no_data_widget.dart';
+import 'package:mawani_pmis/features/common/widgets/common_app_bar.dart';
+import 'package:mawani_pmis/features/common/widgets/common_circular_progress.dart';
+import 'package:mawani_pmis/features/common/widgets/common_error_widget.dart';
+import 'package:mawani_pmis/features/common/widgets/common_search_widget.dart';
+import 'package:mawani_pmis/constants/app_local.dart';
+import '../../../../routes/router.gr.dart';
+import '../../../user_management/common/model/service_enum.dart';
+import '../notifiers/__SNAKE_NAME___notifier.dart';
+import '../models/__SNAKE_NAME___model.dart';
+
+@RoutePage()
+class __FEATURE_NAME__ListView extends StatelessWidget {
+  const __FEATURE_NAME__ListView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return CommonBackground(
+      appBar: const CommonAppBar(
+        appBarTitle: ServiceEnum.__CAMEL_NAME__Management.getListTitle(),
+      ),
+      body: Column(
+        children: [
+          const CommonSearchWidget(noFilter: true),
+          Expanded(
+            child: Consumer(
+              builder: (context, ref, child) {
+                return PaginatedListView<__FEATURE_NAME__Content>(
+                  state: ref.watch(__CAMEL_NAME__ListNotifierProvider),
+                  notifier: ref.read(__CAMEL_NAME__ListNotifierProvider.notifier),
+                  itemBuilder: (context, data) {
+                    return CommonDynamicCard(
+                      fields: [
+__UI_DYNAMIC_FIELDS__                      ],
+                      onTap: () {
+                        context.navigateTo(
+                            __FEATURE_NAME__DetailsRoute(id: data.id ?? 0));
+                      },
+                    );
+                  },
+                  emptyListBuilder: (context) => const CommonNoDataWidget(),
+                  loadingBuilder:
+                      (BuildContext context, Pagination pagination) {
+                    return getCircularProgress(pagination.currentPage);
+                  },
+                  errorBuilder: (context, error, stackTrace) {
+                    return CommonErrorWidget(
+                      error,
+                      reload: () {
+                        ref.invalidate(__CAMEL_NAME__ListNotifierProvider);
+                      },
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}"""
+    view_code = view_template.replace("__FEATURE_NAME__", feature_name).replace("__SNAKE_NAME__", snake_name).replace("__CAMEL_NAME__", camel_name).replace("__UI_DYNAMIC_FIELDS__", dynamic_ui_fields)
+
+    # -------------------------------------------------------------
     # WRITE FOLDERS AND FILES
     # -------------------------------------------------------------
     try:
         os.makedirs(models_dir, exist_ok=True)
         os.makedirs(services_dir, exist_ok=True)
         os.makedirs(notifiers_dir, exist_ok=True)
+        os.makedirs(views_dir, exist_ok=True)
 
         with open(os.path.join(models_dir, f"{snake_name}_model.dart"), "w") as f: 
             f.write(model_code)
@@ -271,12 +351,15 @@ final __CAMEL_NAME__ListNotifierProvider = AsyncNotifierProvider.autoDispose<
             f.write(service_code)
         with open(os.path.join(notifiers_dir, f"{snake_name}_notifier.dart"), "w") as f: 
             f.write(provider_code)
+        with open(os.path.join(views_dir, f"{snake_name}_list_view.dart"), "w") as f: 
+            f.write(view_code)
         
-        messagebox.showinfo("Success", f"🎉 Directory Architecture Created On Desktop!\n\n"
+        messagebox.showinfo("Success", f"🎉 Complete Directory Architecture Created On Desktop!\n\n"
                                        f"Folder: Desktop/{snake_name}/\n"
                                        f"├── models/{snake_name}_model.dart\n"
                                        f"├── services/{snake_name}_service.dart\n"
-                                       f"└── notifiers/{snake_name}_notifier.dart")
+                                       f"├── notifiers/{snake_name}_notifier.dart\n"
+                                       f"└── views/{snake_name}_list_view.dart")
     except Exception as e:
         messagebox.showerror("File Error", f"Could not create folder architecture:\n{str(e)}")
 
@@ -293,7 +376,7 @@ main_frame.pack(fill=tk.BOTH, expand=True)
 ttk.Label(main_frame, text="1. Paste Your Curl Command String:", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(0, 2))
 text_curl = tk.Text(main_frame, height=6, font=("Courier", 10), wrap=tk.WORD, borderwidth=2, relief="groove")
 text_curl.pack(fill=tk.X, pady=(0, 10))
-text_curl.insert("1.0", "curl --location 'https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat-resource?page=0&size=10'")
+text_curl.insert("1.0", "curl --location 'https://qapigw.tabadul.sa/tabadul/pmis2/vesselvoyage/v2/vessel-time-stamp/pagination'")
 
 # 2. Feature Class Name Layout
 ttk.Label(main_frame, text="2. Feature Class Name (Type or click generate from URL):", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(5, 2))
