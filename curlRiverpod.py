@@ -165,14 +165,14 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
         model_code += f"  {feature_name}Pageable({{\n    this.pageNumber,\n  }});\n}}"
 
     # -------------------------------------------------------------
-    # 2. SERVICE CODE
+    # 2. SERVICE CODE (With final params update)
     # -------------------------------------------------------------
     service_template = """import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../../../../network/exception/app_exception.dart';
-import '../../../../../network/network_handler.dart';
-import '../../../../../network/safe_api_call.dart';
-import '../../../../../utils/functional/result.dart';
+import 'package:multiple_result/multiple_result.dart';
+import '../../../../constants/api_constants.dart';
+import '../../../../constants/exceptions/exceptions.dart';
+import '../../../../constants/network/network_handler.dart';
 import '../models/__SNAKE_NAME___model.dart';
 
 class __FEATURE_NAME__ManagementService {
@@ -180,7 +180,7 @@ class __FEATURE_NAME__ManagementService {
     required String crn,
     CancelToken? cancelToken,
   }) async {
-    final queryParameters = {
+    final params = {
       "crn": crn,
     };
 
@@ -189,7 +189,7 @@ class __FEATURE_NAME__ManagementService {
         final jsonResponse = await NetworkHandler.getRequest(
           headers: await NetworkHandler.getCommonPostHeaders(),
           endpoint: __ENDPOINT_VARIABLE__,
-          queryParameters: queryParameters,
+          params: params,
           cancelToken: cancelToken,
         );
 
