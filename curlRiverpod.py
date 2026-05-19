@@ -4,6 +4,7 @@ import json
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+
 def camel_to_snake(name):
     s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
     s2 = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
@@ -21,22 +22,18 @@ def extract_feature_and_endpoint_from_url(curl_str):
     if not curl_str:
         return "VesselTimeStamp", "https://qapigw.tabadul.sa/tabadul/pmis2/vesselvoyage/v2/vessel-time-stamp/pagination"
         
-    # Extract the absolute URL from the curl string (ignores trailing query parameters)
     url_match = re.search(r'(https?://[^\s\'"]+)', curl_str)
     if url_match:
         full_url = url_match.group(1).split('?')[0] 
-        # Split URL into path segments
         segments = [seg for seg in full_url.split('/') if seg and not seg.startswith('http')]
         
         if segments:
-            # Clean up trailing action endpoints safely using a loop filter
             ignored_endpoints = ['pagination', 'crn', 'list', 'search', 'filter']
             while segments and segments[-1].lower() in ignored_endpoints:
                 segments.pop()
             
             if segments:
                 target_segment = segments[-1]
-                # If the last segment is a version descriptor (like v1, v2), grab the preceding segment
                 if re.match(r'^v\d+$', target_segment.lower()) and len(segments) > 1:
                     target_segment = segments[-2]
                     
@@ -291,7 +288,7 @@ class __FEATURE_NAME__ListView extends StatelessWidget {
   Widget build(BuildContext context) {
     return CommonBackground(
       appBar: const CommonAppBar(
-        appBarTitle: ServiceEnum.__CAMEL_NAME__Management.getListTitle(),
+        appBarTitle: ServiceEnum.vesseltimestampManagement.getListTitle(),
       ),
       body: Column(
         children: [
@@ -366,45 +363,149 @@ __UI_DYNAMIC_FIELDS__                      ],
 
 # --- UI Layout ---
 root = tk.Tk()
-root.title("Mawani Structured Architecture Folder Generator")
-root.geometry("650x750")
+root.title("Structured Curl Architecture Folder Generator")
+root.geometry("800x900")
+
+# ── Color palette ──────────────────────────────────
+PRIMARY    = "#006782"
+BG         = "#e8f4f8"
+TEXT_BG    = "#ffffff"
+TEXT_FG    = "#002a36"
+LABEL_FG   = "#ffffff"
+BTN_ACTIVE = "#004f63"
+# ───────────────────────────────────────────────────
+
+root.configure(bg=PRIMARY)
+
+_icon_data = """iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAA8klEQVR4nO3Yyw2DQBAEUcJ2YM7P
+9hEhGfZfM73d0gRQD057HJ7nTd/r/Wm+tOuJTosxIzoNxsr4UAhEeBgIOhxDoGNRCDoQRaDDUAQ6
+CEWgQ3AEOuJ3560FyBzfjaAQ34WgEt8EoBRfjaAYX4WgGh8dYHp8EYByfBGCenw0gOXxtwDA18fO
+AAYwgAEMYAADGMAABjCAAQxgAA4h1nsA9Bds/SKEIDxOGaFoEMAShOgA0xGKp4hQPSWEpsEAQxGa
+p4DQvcwIQxYAoPmGjQ5B4zMiTBsdhsZnQFg6OhYLj4YQYtuGn7d1/HVbRv/bltFejn0BBzpDHpDt
+ugcAAAAASUVORK5CYII="""
+_icon = tk.PhotoImage(data=_icon_data)
+root.iconphoto(True, _icon)
+
+style = ttk.Style()
+style.theme_use("clam")
+style.configure("TFrame",          background=PRIMARY)
+style.configure("TLabel",          background=PRIMARY, foreground=LABEL_FG,
+                                   font=("Helvetica", 11, "bold"))
+style.configure("TEntry",          fieldbackground=TEXT_BG, foreground=TEXT_FG,
+                                   bordercolor="#aaccdd", insertcolor=PRIMARY)
+style.configure("Accent.TButton",  background=PRIMARY, foreground=LABEL_FG,
+                                   font=("Helvetica", 12, "bold"),
+                                   borderwidth=0, relief="flat")
+style.map("Accent.TButton",
+          background=[("active", BTN_ACTIVE), ("pressed", BTN_ACTIVE)])
 
 main_frame = ttk.Frame(root, padding="15")
 main_frame.pack(fill=tk.BOTH, expand=True)
 
 # 1. Curl Input Box
-ttk.Label(main_frame, text="1. Paste Your Curl Command String:", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(0, 2))
-text_curl = tk.Text(main_frame, height=6, font=("Courier", 10), wrap=tk.WORD, borderwidth=2, relief="groove")
+ttk.Label(main_frame, text="1. Paste Your Curl Command String:").pack(anchor=tk.W, pady=(0, 2))
+text_curl = tk.Text(main_frame, height=6, font=("Courier", 10), wrap=tk.WORD,
+                    borderwidth=0, relief="flat",
+                    bg=TEXT_BG, fg=TEXT_FG,
+                    insertbackground=PRIMARY,
+                    selectbackground=PRIMARY, selectforeground=LABEL_FG)
 text_curl.pack(fill=tk.X, pady=(0, 10))
-text_curl.insert("1.0", "curl --location 'https://qapigw.tabadul.sa/tabadul/pmis2/vesselvoyage/v2/vessel-time-stamp/pagination'")
 
-# 2. Feature Class Name Layout
-ttk.Label(main_frame, text="2. Feature Class Name (Type or click generate from URL):", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(5, 2))
+default_curl = r'''curl ^"https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat/tugs-and-pilot-get-all-boats?page=0^&size=10^&search=^&_=1779192734934^" ^
+  -H ^"Accept: application/json, text/javascript, */*; q=0.01^" ^
+  -H ^"Accept-Language: en^" ^
+  -H ^"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJSMFU3LXVvTnowbThienVlQW1JMVRiYU5HeDNLdVpPWE43a2RncVpXWlQ0In0^" ^
+  -H ^"Connection: keep-alive^" ^
+  -H ^"Referer: https://q-pmis2.tabadul.sa/pilot-memo-activity/boat-master-listing^" ^
+  -H ^"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36^" ^
+  -H ^"X-Requested-With: XMLHttpRequest^"'''
+text_curl.insert("1.0", default_curl)
 
-name_frame = ttk.Frame(main_frame)
-name_frame.pack(fill=tk.X, pady=(0, 15))
-
-entry_custom_name = ttk.Entry(name_frame, font=("Helvetica", 11))
-entry_custom_name.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+# 2. Feature Class Name (auto-fills on paste)
+ttk.Label(main_frame, text="2. Feature Class Name:").pack(anchor=tk.W, pady=(5, 2))
+entry_custom_name = ttk.Entry(main_frame, font=("Helvetica", 11))
+entry_custom_name.pack(fill=tk.X, pady=(0, 15))
 
 def on_click_parse_name():
     curl_content = text_curl.get("1.0", tk.END).strip()
     predicted_pascal, _ = extract_feature_and_endpoint_from_url(curl_content)
-    
     entry_custom_name.delete(0, tk.END)
     entry_custom_name.insert(0, predicted_pascal)
 
-btn_parse_name = ttk.Button(name_frame, text="🔍 Parse from URL", command=on_click_parse_name)
-btn_parse_name.pack(side=tk.RIGHT)
+def on_curl_changed(event=None):
+    on_click_parse_name()
+    text_curl.edit_modified(False)
 
+text_curl.bind("<<Modified>>", on_curl_changed)
 on_click_parse_name()
 
 # 3. Payload JSON Input Box
-ttk.Label(main_frame, text="3. Paste JSON Output Data Payload Here:", font=("Helvetica", 11, "bold")).pack(anchor=tk.W, pady=(0, 2))
-text_json = tk.Text(main_frame, height=14, font=("Courier", 10), wrap=tk.WORD, borderwidth=2, relief="groove")
+ttk.Label(main_frame, text="3. Paste JSON Output Data Payload Here:").pack(anchor=tk.W, pady=(0, 2))
+text_json = tk.Text(main_frame, height=14, font=("Courier", 10), wrap=tk.WORD,
+                    borderwidth=0, relief="flat",
+                    bg=TEXT_BG, fg=TEXT_FG,
+                    insertbackground=PRIMARY,
+                    selectbackground=PRIMARY, selectforeground=LABEL_FG)
 text_json.pack(fill=tk.BOTH, expand=True, pady=(0, 20))
 
-dummy_json = '{\n  "responseCode": 200,\n  "responseMessage": "Success",\n  "data": {\n    "content": [],\n    "pageable": {}\n  }\n}'
+dummy_json = """{
+    "responseCode": 200,
+    "responseMessage": "SUCCESS",
+    "data": {
+        "content": [
+            {
+                "boatCode": "56211",
+                "boatName": "AutoBoatname",
+                "createdDate": "21-10-2025 15:57:54",
+                "imoNo": 90336,
+                "id": 100083,
+                "status": null,
+                "boatTypeRid": 2400,
+                "boatClass": 2440,
+                "portRid": 8,
+                "boatTypeName": "Tugboat",
+                "boatClassName": "Conventional tug",
+                "ownType": "2402",
+                "ownTypeCode": null,
+                "ownTypeDesc": null,
+                "typeOfBasisPurpose": 2446,
+                "typeOfBasisPurposeDesc": null,
+                "email": "aa@test.com",
+                "contactNo": 654123456234,
+                "startDate": null,
+                "endDate": null,
+                "buildYear": 2025,
+                "buildType": 2455,
+                "buildTypeDesc": null,
+                "dimensions": null,
+                "draft": 234,
+                "capacity": null,
+                "grt": 234,
+                "topSpeed": 234,
+                "safety": [{"id": 100099, "safetyEquipmentTypeRid": 2467, "safetyEquipmentExpiryDate": null, "safetyEquipmentTypeName": null}],
+                "document": [{"id": 100072, "documentTypeRid": 1, "filePath": "1_1761051455.pdf", "documentValidityDate": "21-10-2025", "fileSizeKb": null, "fileType": null}],
+                "createdBy": "portoperator"
+            }
+        ],
+        "pageable": {
+            "pageNumber": 0,
+            "pageSize": 10,
+            "sort": [],
+            "offset": 0,
+            "unpaged": false,
+            "paged": true
+        },
+        "totalPages": 3,
+        "totalElements": 26,
+        "last": false,
+        "size": 10,
+        "number": 0,
+        "sort": [],
+        "numberOfElements": 10,
+        "first": true,
+        "empty": false
+    }
+}"""
 text_json.insert("1.0", dummy_json)
 
 def on_generate():
@@ -414,7 +515,10 @@ def on_generate():
         raw_curl_str=text_curl.get("1.0", tk.END)
     )
 
-btn_generate = ttk.Button(main_frame, text="🚀 Generate Data Architecture", command=on_generate)
-btn_generate.pack(fill=tk.X, ipady=10)
+btn_generate = ttk.Button(main_frame, text="🚀 Generate Data Architecture",
+                           command=on_generate, style="Accent.TButton")
+btn_generate.pack(fill=tk.X, ipady=12)
+
+root.mainloop()
 
 root.mainloop()
