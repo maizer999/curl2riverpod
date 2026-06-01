@@ -1,6 +1,7 @@
 import re
 import os
 import json
+from urllib.parse import urlparse, parse_qs
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -11,12 +12,33 @@ def camel_to_snake(name):
     return re.sub(r'[-_\s]+', '_', s2)
 
 def clean_to_pascal(segment):
-    words = re.split(r'[-_\s]', segment)
-    return "".join(w.capitalize() for w in words if w)
+    # First split on camelCase/PascalCase boundaries, then on hyphens, underscores, spaces
+    spaced = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', segment)
+    words = re.split(r'[-_\s/]', spaced)
+    return "".join(w.lower().capitalize() for w in words if w)
 
 def to_camel_case(text):
     pascal = clean_to_pascal(text)
     return pascal[0].lower() + pascal[1:]
+
+def pascal_to_title(name):
+    """Convert PascalCase to readable title: 'VesselTimestamp' -> 'Vessel Timestamp'"""
+    words = re.sub(r'([A-Z])', r' \1', name).strip()
+    return words
+
+def extract_query_params_from_url(curl_str):
+    """Extract query parameters from the URL in a curl command string."""
+    if not curl_str:
+        return {}
+    url_match = re.search(r'(https?://[^\s\'"]+)', curl_str)
+    if url_match:
+        raw_url = url_match.group(1).replace('^', '')
+        parsed = urlparse(raw_url)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        # parse_qs returns lists, flatten single values
+        return {k: v[0] if len(v) == 1 else v for k, v in params.items()}
+    return {}
+
 
 def extract_feature_and_endpoint_from_url(curl_str):
     if not curl_str:
@@ -24,19 +46,31 @@ def extract_feature_and_endpoint_from_url(curl_str):
         
     url_match = re.search(r'(https?://[^\s\'"]+)', curl_str)
     if url_match:
-        full_url = url_match.group(1).split('?')[0] 
+        # Clean up windows line continuation carets (^) if present in the URL string
+        raw_url = url_match.group(1).replace('^', '')
+        full_url = raw_url.split('?')[0] 
         segments = [seg for seg in full_url.split('/') if seg and not seg.startswith('http')]
         
         if segments:
-            ignored_endpoints = ['pagination', 'crn', 'list', 'search', 'filter']
+            # We add version tags here so they are cleanly popped off if they come after the feature name
+            ignored_endpoints = ['pagination', 'crn', 'list', 'search', 'filter', 'v1', 'v2', 'v3', 'v4']
             while segments and segments[-1].lower() in ignored_endpoints:
                 segments.pop()
             
             if segments:
                 target_segment = segments[-1]
+                # if last segment is a version token, fall back to previous
                 if re.match(r'^v\d+$', target_segment.lower()) and len(segments) > 1:
                     target_segment = segments[-2]
-                    
+                # If the last segment looks like a 'by-...' qualifier or an id placeholder, use the previous segment
+                if re.match(r'^(by[-_].+|byid|by-id|by)$', target_segment.lower()) and len(segments) > 1:
+                    target_segment = segments[-2]
+                if re.search(r'\{.+\}', target_segment) and len(segments) > 1:
+                    target_segment = segments[-2]
+                # If target looks numeric, use previous segment
+                if target_segment.isdigit() and len(segments) > 1:
+                    target_segment = segments[-2]
+
                 return clean_to_pascal(target_segment), full_url
                 
     return "VesselTimeStamp", "https://qapigw.tabadul.sa/tabadul/pmis2/vesselvoyage/v2/vessel-time-stamp/pagination"
@@ -58,7 +92,7 @@ def get_dart_type(value, key, feature_name):
         return f"{feature_name}{key.capitalize()}?"
     return "dynamic"
 
-def process_generation(raw_feature_name, raw_json, raw_curl_str):
+def process_generation(raw_feature_name, raw_json, raw_curl_str, show_message=True):
     input_name = raw_feature_name.strip()
     if not input_name:
         messagebox.showerror("Error", "Feature Name cannot be empty.")
@@ -76,6 +110,7 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
     
     _, full_url = extract_feature_and_endpoint_from_url(raw_curl_str)
     endpoint_variable = f"'{full_url}'"
+    query_params = extract_query_params_from_url(raw_curl_str)
     
     # -------------------------------------------------------------
     # SETUP DIRECTORIES STRUCTURE
@@ -161,7 +196,35 @@ def process_generation(raw_feature_name, raw_json, raw_curl_str):
     # -------------------------------------------------------------
     # 2. SERVICE CODE
     # -------------------------------------------------------------
-    service_template = """import 'package:dio/dio.dart';
+    # Build query params string for the service template
+    # -------------------------------------------------------------
+    if query_params:
+        params_lines = []
+        method_params = []
+        for key, value in query_params.items():
+            if key == '_':
+                continue  # Skip cache-busting timestamp param
+            if key == 'page':
+                method_params.append(f"    required int {key},")
+                params_lines.append(f'      "{key}": {key}.toString(),')
+            elif key == 'size':
+                method_params.append(f"    int {key} = 10,")
+                params_lines.append(f'      "{key}": {key}.toString(),')
+            elif key == 'search':
+                method_params.append(f"    String {key} = '',")
+                params_lines.append(f'      "{key}": {key},')
+            else:
+                method_params.append(f"    String? {key},")
+                params_lines.append(f'      if ({key} != null) "{key}": {key},')
+        
+        method_params_str = "\n".join(method_params)
+        params_map_str = "\n".join(params_lines)
+    else:
+        method_params_str = "    required String crn,"
+        params_map_str = '      "crn": crn,'
+
+    # -------------------------------------------------------------
+    service_template = f"""import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:multiple_result/multiple_result.dart';
 import '../../../../constants/api_constants.dart';
@@ -169,35 +232,35 @@ import '../../../../constants/exceptions/exceptions.dart';
 import '../../../../constants/network/network_handler.dart';
 import '../models/__SNAKE_NAME___model.dart';
 
-class __FEATURE_NAME__ManagementService {
-  Future<Result<__FEATURE_NAME__Response, AppException>> get__FEATURE_NAME__Details({
-    required String crn,
+class __FEATURE_NAME__ManagementService {{
+  Future<Result<__FEATURE_NAME__Response, AppException>> get__FEATURE_NAME__Details({{
+{method_params_str}
     CancelToken? cancelToken,
-  }) async {
-    final params = {
-      "crn": crn,
-    };
+  }}) async {{
+    final params = {{
+{params_map_str}
+    }};
 
-    try {
-      return await safeApiCall(() async {
+    try {{
+      return await safeApiCall(() async {{
         final jsonResponse = await NetworkHandler.getRequest(
-          headers: await NetworkHandler.getCommonPostHeaders(),
+          headers: await NetworkHandler.getCommonHeaders(),
           endpoint: __ENDPOINT_VARIABLE__,
           params: params,
           cancelToken: cancelToken,
         );
 
         return Success(__FEATURE_NAME__ResponseMapper.fromMap(jsonResponse));
-      });
-    } catch (e) {
+      }});
+    }} catch (e) {{
       return Error(e as AppException);
-    }
-  }
-}
+    }}
+  }}
+}}
 
-final __CAMEL_NAME__ServiceProvider = Provider.autoDispose<__FEATURE_NAME__ManagementService>((ref) {
+final __CAMEL_NAME__ServiceProvider = Provider.autoDispose<__FEATURE_NAME__ManagementService>((ref) {{
   return __FEATURE_NAME__ManagementService();
-});"""
+}});"""
     service_code = service_template.replace("__FEATURE_NAME__", feature_name).replace("__ENDPOINT_VARIABLE__", endpoint_variable).replace("__SNAKE_NAME__", snake_name).replace("__CAMEL_NAME__", camel_name)
 
     # -------------------------------------------------------------
@@ -221,10 +284,11 @@ class __FEATURE_NAME__ViewNotifier extends AutoDisposeAsyncNotifier<List<__FEATU
     return init(
       dataFetcher: PaginatedDataRepository(
         fetcher: ({required page, query}) async {
-          final crnQuery = ref.watch(searchQueryProvider);
+          final searchQuery = ref.watch(searchQueryProvider);
 
           final result = await ref.watch(__CAMEL_NAME__ServiceProvider).get__FEATURE_NAME__Details(
-            crn: crnQuery,
+            page: searchQuery.isNotEmpty ? 0 : page - 1,
+            search: searchQuery,
             cancelToken: ref.cancelToken(),
           );
 
@@ -256,10 +320,13 @@ final __CAMEL_NAME__ListNotifierProvider = AsyncNotifierProvider.autoDispose<
     # -------------------------------------------------------------
     dynamic_ui_fields = ""
     if content_obj:
-        for k in content_obj.keys():
+        for k, v in content_obj.items():
             if k == "id": continue
             readable_label = k.replace('_', ' ').title()
-            dynamic_ui_fields += f"                        LabelValue(\n                            label: \"{readable_label}\",\n                            value: data.{k} ?? \"-\"),\n"
+            if isinstance(v, str) or v is None:
+                dynamic_ui_fields += f"                        LabelValue(\n                            label: \"{readable_label}\",\n                            value: data.{k} ?? \"-\"),\n"
+            else:
+                dynamic_ui_fields += f"                        LabelValue(\n                            label: \"{readable_label}\",\n                            value: data.{k}?.toString() ?? \"-\"),\n"
     else:
         dynamic_ui_fields = f"                        LabelValue(\n                            label: \"Title\",\n                            value: \"-\"),\n"
 
@@ -288,7 +355,7 @@ class __FEATURE_NAME__ListView extends StatelessWidget {
   Widget build(BuildContext context) {
     return CommonBackground(
       appBar: const CommonAppBar(
-        appBarTitle: ServiceEnum.vesseltimestampManagement.getListTitle(),
+        appBarTitle: "__LIST_TITLE__",
       ),
       body: Column(
         children: [
@@ -331,7 +398,8 @@ __UI_DYNAMIC_FIELDS__                      ],
     );
   }
 }"""
-    view_code = view_template.replace("__FEATURE_NAME__", feature_name).replace("__SNAKE_NAME__", snake_name).replace("__CAMEL_NAME__", camel_name).replace("__UI_DYNAMIC_FIELDS__", dynamic_ui_fields)
+    list_title = pascal_to_title(feature_name)
+    view_code = view_template.replace("__FEATURE_NAME__", feature_name).replace("__SNAKE_NAME__", snake_name).replace("__CAMEL_NAME__", camel_name).replace("__UI_DYNAMIC_FIELDS__", dynamic_ui_fields).replace("__LIST_TITLE__", list_title)
 
     # -------------------------------------------------------------
     # WRITE FOLDERS AND FILES
@@ -351,31 +419,363 @@ __UI_DYNAMIC_FIELDS__                      ],
         with open(os.path.join(views_dir, f"{snake_name}_list_view.dart"), "w") as f: 
             f.write(view_code)
         
-        messagebox.showinfo("Success", f"🎉 Complete Directory Architecture Created On Desktop!\n\n"
-                                       f"Folder: Desktop/{snake_name}/\n"
-                                       f"├── models/{snake_name}_model.dart\n"
-                                       f"├── services/{snake_name}_service.dart\n"
-                                       f"├── notifiers/{snake_name}_notifier.dart\n"
-                                       f"└── views/{snake_name}_list_view.dart")
+        if show_message:
+            messagebox.showinfo("Success", f"🎉 Complete Directory Architecture Created On Desktop!\n\n"
+                                           f"Folder: Desktop/{snake_name}/\n"
+                                           f"├── models/{snake_name}_model.dart\n"
+                                           f"├── services/{snake_name}_service.dart\n"
+                                           f"├── notifiers/{snake_name}_notifier.dart\n"
+                                           f"└── views/{snake_name}_list_view.dart")
     except Exception as e:
         messagebox.showerror("File Error", f"Could not create folder architecture:\n{str(e)}")
 
 
-# --- UI Layout ---
+# -------------------------------------------------------------
+# DETAILS MODEL CODE GENERATOR
+# -------------------------------------------------------------
+def generate_details_model_code(feature_name, snake_name, camel_name, details_data):
+    data_obj = details_data.get("data", {})
+    if not isinstance(data_obj, dict):
+        data_obj = {}
+
+    # Detect an identifier key that should be normalized to 'id' in the model
+    identifier_key = None
+    if 'id' in data_obj:
+        identifier_key = 'id'
+    else:
+        camel_id = f"{camel_name}id".lower()
+        snake_id = f"{snake_name}_id".lower()
+        feature_id = feature_name.lower() + 'id'
+        for k in data_obj.keys():
+            lk = k.lower()
+            if lk == camel_id or lk == snake_id or lk == feature_id:
+                identifier_key = k
+                break
+
+    model_code = f"import 'package:dart_mappable/dart_mappable.dart';\n\n"
+    model_code += f"part '{snake_name}_details_model.mapper.dart';\n\n"
+
+    model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}DetailsResponse with {feature_name}DetailsResponseMappable {{\n"
+    model_code += "  final int responseCode;\n  final String responseMessage;\n\n"
+    model_code += f"  @MappableField(key: \"data\")\n  final {feature_name}Details? {camel_name}Details;\n\n"
+    model_code += f"  {feature_name}DetailsResponse({{\n    required this.responseCode,\n    required this.responseMessage,\n    this.{camel_name}Details,\n  }});\n}}\n\n"
+
+    model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}Details with {feature_name}DetailsMappable {{\n"
+    if data_obj:
+        for k, v in data_obj.items():
+            # If this key is chosen as the identifier, expose it as 'id' while mapping from original key
+            field_name = k
+            annotation = ""
+            if identifier_key and k == identifier_key and k != 'id':
+                annotation = f"  @MappableField(key: \"{k}\")\n"
+                field_name = 'id'
+
+            if isinstance(v, list):
+                model_code += f"{annotation}  final List<dynamic>? {field_name};\n"
+            elif isinstance(v, dict):
+                model_code += f"{annotation}  final dynamic {field_name};\n"
+            else:
+                model_code += f"{annotation}  final {get_dart_type(v, k, feature_name)} {field_name};\n"
+        model_code += f"\n  {feature_name}Details({{\n"
+        for k in data_obj.keys():
+            if identifier_key and k == identifier_key and k != 'id':
+                model_code += f"    this.id,\n"
+            else:
+                model_code += f"    this.{k},\n"
+        model_code += "  });\n}"
+    else:
+        model_code += "  final int? id;\n\n"
+        model_code += f"  {feature_name}Details({{\n    this.id,\n  }});\n}}"
+
+    return model_code
+
+
+# -------------------------------------------------------------
+# COMBINED SERVICE CODE GENERATOR (list + details)
+# -------------------------------------------------------------
+def generate_combined_service_code(feature_name, snake_name, camel_name, list_url, details_url, list_curl=None):
+    query_params = extract_query_params_from_url(list_curl) if list_curl else {}
+    
+    if query_params:
+        method_params_lines = []
+        params_map_lines = []
+        for key, value in query_params.items():
+            if key == '_':
+                continue
+            if key == 'page':
+                method_params_lines.append(f"    required int {key},")
+                params_map_lines.append(f'      "{key}": {key}.toString(),')
+            elif key == 'size':
+                method_params_lines.append(f"    int {key} = 10,")
+                params_map_lines.append(f'      "{key}": {key}.toString(),')
+            elif key == 'search':
+                method_params_lines.append(f"    String {key} = '',")
+                params_map_lines.append(f'      "{key}": {key},')
+            else:
+                method_params_lines.append(f"    String? {key},")
+                params_map_lines.append(f'      if ({key} != null) "{key}": {key},')
+        method_params_str = "\n".join(method_params_lines)
+        params_map_str = "\n".join(params_map_lines)
+    else:
+        method_params_str = "    required String crn,"
+        params_map_str = '      "crn": crn,'
+
+    return f"""import 'package:dio/dio.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:multiple_result/multiple_result.dart';
+import '../../../../constants/api_constants.dart';
+import '../../../../constants/exceptions/exceptions.dart';
+import '../../../../constants/network/network_handler.dart';
+import '../models/{snake_name}_model.dart';
+import '../models/{snake_name}_details_model.dart';
+
+class {feature_name}ManagementService {{
+  Future<Result<{feature_name}Response, AppException>> get{feature_name}Details({{
+{method_params_str}
+    CancelToken? cancelToken,
+  }}) async {{
+    final params = {{
+{params_map_str}
+    }};
+    try {{
+      return await safeApiCall(() async {{
+        final jsonResponse = await NetworkHandler.getRequest(
+          headers: await NetworkHandler.getCommonHeaders(),
+          endpoint: '{list_url}',
+          params: params,
+          cancelToken: cancelToken,
+        );
+        return Success({feature_name}ResponseMapper.fromMap(jsonResponse));
+      }});
+    }} catch (e) {{
+      return Error(e as AppException);
+    }}
+  }}
+
+  Future<Result<{feature_name}DetailsResponse, AppException>> get{feature_name}ById({{
+    required int id,
+    CancelToken? cancelToken,
+  }}) async {{
+    try {{
+      return await safeApiCall(() async {{
+        final jsonResponse = await NetworkHandler.getRequest(
+          headers: await NetworkHandler.getCommonHeaders(),
+          endpoint: '{details_url}/$id',
+          cancelToken: cancelToken,
+        );
+        return Success({feature_name}DetailsResponseMapper.fromMap(jsonResponse));
+      }});
+    }} catch (e) {{
+      return Error(e as AppException);
+    }}
+  }}
+}}
+
+final {camel_name}ServiceProvider = Provider.autoDispose<{feature_name}ManagementService>((ref) {{
+  return {feature_name}ManagementService();
+}});"""
+
+
+# -------------------------------------------------------------
+# DETAILS NOTIFIER CODE GENERATOR
+# -------------------------------------------------------------
+def generate_details_notifier_code(feature_name, snake_name, camel_name):
+    return f"""import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mawani_pmis/utils/extension/cancel_extension.dart';
+import 'package:mawani_pmis/utils/extension/result_extension.dart';
+import '../models/{snake_name}_details_model.dart';
+import '../services/{snake_name}_service.dart';
+
+class {feature_name}DetailsViewNotifier extends AutoDisposeFamilyAsyncNotifier<{feature_name}Details?, int> {{
+
+  @override
+  FutureOr<{feature_name}Details?> build(int id) async {{
+    state = const AsyncLoading();
+    try {{
+      final result = await ref.watch({camel_name}ServiceProvider).get{feature_name}ById(
+        id: id,
+        cancelToken: ref.cancelToken(),
+      );
+
+      final response = result.getOrThrowError();
+      return response.{camel_name}Details;
+    }} catch (e) {{
+      state = AsyncError(e, StackTrace.current);
+      return null;
+    }}
+  }}
+}}
+
+final {camel_name}DetailsNotifierProvider = AsyncNotifierProvider.autoDispose
+    .family<{feature_name}DetailsViewNotifier, {feature_name}Details?, int>(
+  {feature_name}DetailsViewNotifier.new,
+  name: "{feature_name}DetailsNotifier",
+);"""
+
+
+# -------------------------------------------------------------
+# DETAILS VIEW CODE GENERATOR
+# -------------------------------------------------------------
+def generate_details_view_code(feature_name, snake_name, camel_name, details_data):
+    data_obj = details_data.get("data", {})
+    if not isinstance(data_obj, dict):
+        data_obj = {}
+
+    list_title = pascal_to_title(feature_name)
+
+    # Generate TitleSubtitleModel fields
+    detail_fields = ""
+    if data_obj:
+        for k, v in data_obj.items():
+            if k == "id":
+                continue
+            readable_label = k.replace('_', ' ').title()
+            if isinstance(v, str) or v is None:
+                detail_fields += f"                      TitleSubtitleModel(\n                        title: \"{readable_label}\",\n                        subTitle: data.{k} ?? \"-\",\n                      ),\n"
+            else:
+                detail_fields += f"                      TitleSubtitleModel(\n                        title: \"{readable_label}\",\n                        subTitle: data.{k}?.toString() ?? \"-\",\n                      ),\n"
+    else:
+        detail_fields = f"                      TitleSubtitleModel(\n                        title: \"Id\",\n                        subTitle: data.id?.toString() ?? \"-\",\n                      ),\n"
+
+    return f"""import 'package:auto_route/auto_route.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mawani_pmis/constants/app_sizes.dart';
+import 'package:mawani_pmis/features/common/widgets/common_app_bar.dart';
+import 'package:mawani_pmis/features/common/widgets/common_background.dart';
+import 'package:mawani_pmis/features/common/models/title_subtile_model.dart';
+import 'package:mawani_pmis/features/common/widgets/custom_expansion_tile_with_details.dart';
+import '../../../common/widgets/common_circular_progress.dart';
+import '../../../common/widgets/common_error_widget.dart';
+import '../../../common/widgets/common_no_data_widget.dart';
+import '../notifiers/{snake_name}_details_notifier.dart';
+
+@RoutePage()
+class {feature_name}DetailsView extends ConsumerWidget {{
+  final int {camel_name}Id;
+
+  const {feature_name}DetailsView({{super.key, required this.{camel_name}Id}});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {{
+    final detailsAsync = ref.watch({camel_name}DetailsNotifierProvider({camel_name}Id));
+
+    return CommonBackground(
+      appBar: const CommonAppBar(appBarTitle: "{list_title} Details"),
+      body: detailsAsync.when(
+        data: (data) {{
+          if (data == null) {{
+            return const Center(child: CommonNoDataWidget());
+          }}
+          return Padding(
+            padding: AppSizes.symmetricHorizontalMargin,
+            child: SingleChildScrollView(
+              child: Column(
+                children: [
+                  CustomExpansionTileWithDetails(
+                    initiallyExpanded: true,
+                    heading: "{list_title} Details",
+                    titleSubTitles: [
+{detail_fields}                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        }},
+        error: (error, stack) {{
+          return CommonErrorWidget(
+            error,
+            reload: () => ref.invalidate({camel_name}DetailsNotifierProvider({camel_name}Id)),
+          );
+        }},
+        loading: () => const CommonCircularProgress(),
+      ),
+    );
+  }}
+}}"""
+
+
+# -------------------------------------------------------------
+# COMBINED GENERATION (list + details)
+# -------------------------------------------------------------
+def process_combined_generation(list_name, list_json_str, list_curl, details_json_str, details_curl):
+    list_name = list_name.strip()
+    if not list_name:
+        messagebox.showerror("Error", "List Feature Name cannot be empty.")
+        return
+
+    try:
+        details_data = json.loads(details_json_str.strip())
+    except Exception as e:
+        messagebox.showerror("JSON Error", f"Invalid Details JSON:\n{str(e)}")
+        return
+
+    # Generate list files first (reuses existing logic)
+    process_generation(list_name, list_json_str, list_curl, show_message=False)
+
+    # Derive naming from list name
+    feature_name = clean_to_pascal(list_name)
+    snake_name   = camel_to_snake(list_name)
+    camel_name   = to_camel_case(list_name)
+
+    _, list_url    = extract_feature_and_endpoint_from_url(list_curl)
+    _, details_url = extract_feature_and_endpoint_from_url(details_curl)
+
+    desktop_dir       = os.path.expanduser("~/Desktop")
+    feature_root_dir  = os.path.join(desktop_dir, snake_name)
+    models_dir        = os.path.join(feature_root_dir, "models")
+    services_dir      = os.path.join(feature_root_dir, "services")
+    notifiers_dir     = os.path.join(feature_root_dir, "notifiers")
+    views_dir         = os.path.join(feature_root_dir, "views")
+
+    try:
+        details_model_code    = generate_details_model_code(feature_name, snake_name, camel_name, details_data)
+        combined_service_code = generate_combined_service_code(feature_name, snake_name, camel_name, list_url, details_url, list_curl=list_curl)
+        details_notifier_code = generate_details_notifier_code(feature_name, snake_name, camel_name)
+        details_view_code     = generate_details_view_code(feature_name, snake_name, camel_name, details_data)
+
+        with open(os.path.join(models_dir,    f"{snake_name}_details_model.dart"), "w") as f:
+            f.write(details_model_code)
+        with open(os.path.join(services_dir,  f"{snake_name}_service.dart"), "w") as f:
+            f.write(combined_service_code)
+        with open(os.path.join(notifiers_dir, f"{snake_name}_details_notifier.dart"), "w") as f:
+            f.write(details_notifier_code)
+        with open(os.path.join(views_dir,     f"{snake_name}_details_view.dart"), "w") as f:
+            f.write(details_view_code)
+
+        messagebox.showinfo("Success",
+            f"🎉 Full Architecture (List + Details) Created!\n\n"
+            f"Folder: Desktop/{snake_name}/\n"
+            f"├── models/{snake_name}_model.dart\n"
+            f"├── models/{snake_name}_details_model.dart\n"
+            f"├── services/{snake_name}_service.dart  ← combined\n"
+            f"├── notifiers/{snake_name}_notifier.dart\n"
+            f"├── notifiers/{snake_name}_details_notifier.dart\n"
+            f"├── views/{snake_name}_list_view.dart\n"
+            f"└── views/{snake_name}_details_view.dart")
+    except Exception as e:
+        messagebox.showerror("File Error", f"Could not create files:\n{str(e)}")
+
+
 root = tk.Tk()
 root.title("Structured Curl Architecture Folder Generator")
-root.geometry("800x900")
+root.geometry("860x940")
 
-# ── Color palette ──────────────────────────────────
-PRIMARY    = "#006782"
-BG         = "#e8f4f8"
-TEXT_BG    = "#ffffff"
-TEXT_FG    = "#002a36"
-LABEL_FG   = "#ffffff"
-BTN_ACTIVE = "#004f63"
+# ── Light corporate palette ─────────────────────────
+PRIMARY    = "#1E3A8A"   # Deep Corporate Navy Blue
+ACCENT     = "#3B82F6"   # Vibrant Blue (active states)
+SECONDARY  = "#F59E0B"   # Solar Orange (alternate accent)
+BG         = "#F8FAFC"   # Off-White form background
+TEXT_BG    = "#FFFFFF"   # Input background
+TEXT_FG    = "#0F172A"   # Dark slate text
+LABEL_FG   = "#0F172A"   # Label color
+BTN_ACTIVE = "#3B82F6"   # Button hover (vibrant blue)
+BORDER     = "#E2E8F0"   # Light gray border
 # ───────────────────────────────────────────────────
 
-root.configure(bg=PRIMARY)
+root.configure(bg=BG)
 
 _icon_data = """iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAA8klEQVR4nO3Yyw2DQBAEUcJ2YM7P
 9hEhGfZfM73d0gRQD057HJ7nTd/r/Wm+tOuJTosxIzoNxsr4UAhEeBgIOhxDoGNRCDoQRaDDUAQ6
@@ -388,30 +788,172 @@ root.iconphoto(True, _icon)
 
 style = ttk.Style()
 style.theme_use("clam")
-style.configure("TFrame",          background=PRIMARY)
-style.configure("TLabel",          background=PRIMARY, foreground=LABEL_FG,
-                                   font=("Helvetica", 11, "bold"))
-style.configure("TEntry",          fieldbackground=TEXT_BG, foreground=TEXT_FG,
-                                   bordercolor="#aaccdd", insertcolor=PRIMARY)
-style.configure("Accent.TButton",  background=PRIMARY, foreground=LABEL_FG,
-                                   font=("Helvetica", 12, "bold"),
-                                   borderwidth=0, relief="flat")
+
+style.configure("TFrame",
+                background=BG)
+style.configure("Card.TFrame",
+                background="#FFFFFF", relief="flat")
+style.configure("TLabel",
+                background=BG, foreground=LABEL_FG,
+                font=("Helvetica", 11))
+style.configure("Heading.TLabel",
+                background=BG, foreground=PRIMARY,
+                font=("Helvetica", 13, "bold"))
+style.configure("TEntry",
+                fieldbackground=TEXT_BG, foreground=TEXT_FG,
+                bordercolor=BORDER, insertcolor=ACCENT,
+                padding=10)
+style.configure("TCombobox",
+                fieldbackground=TEXT_BG, foreground=TEXT_FG,
+                padding=8)
+
+# Action button (primary CTA)
+style.configure("Accent.TButton",
+                background=PRIMARY, foreground="#ffffff",
+                font=("Helvetica", 12, "bold"),
+                borderwidth=0, relief="flat",
+                padding=8)
 style.map("Accent.TButton",
-          background=[("active", BTN_ACTIVE), ("pressed", BTN_ACTIVE)])
+          background=[("active", BTN_ACTIVE), ("pressed", ACCENT)],
+          foreground=[("disabled", "#94a3b8")])
 
-main_frame = ttk.Frame(root, padding="15")
-main_frame.pack(fill=tk.BOTH, expand=True)
+# Notebook chrome
+style.configure("TNotebook",
+                background=BG, borderwidth=0, tabmargins=[8, 8, 0, 0])
+style.configure("TNotebook.Tab",
+                background=BG, foreground=LABEL_FG,
+                font=("Helvetica", 10),
+                padding=[10, 6])
+style.map("TNotebook.Tab",
+          background=[("selected", BG)],
+          foreground=[("selected", PRIMARY)],
+          font=[("selected", ("Helvetica", 12, "bold")), ("!selected", ("Helvetica", 10))],
+          padding=[("selected", [12, 8]), ("!selected", [10, 6])])
 
-# 1. Curl Input Box
-ttk.Label(main_frame, text="1. Paste Your Curl Command String:").pack(anchor=tk.W, pady=(0, 2))
-text_curl = tk.Text(main_frame, height=6, font=("Courier", 10), wrap=tk.WORD,
-                    borderwidth=0, relief="flat",
-                    bg=TEXT_BG, fg=TEXT_FG,
-                    insertbackground=PRIMARY,
-                    selectbackground=PRIMARY, selectforeground=LABEL_FG)
-text_curl.pack(fill=tk.X, pady=(0, 10))
+style.configure("Separator.TSeparator", background=BORDER)
 
-default_curl = r'''curl ^"https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat/tugs-and-pilot-get-all-boats?page=0^&size=10^&search=^&_=1779192734934^" ^
+# Title bar canvas strip
+header = tk.Canvas(root, bg="#11111b", height=56, highlightthickness=0)
+header.pack(fill=tk.X)
+header.create_text(20, 28, text="⚡ Curl → Riverpod Architecture Generator",
+                   fill=ACCENT, font=("Helvetica", 15, "bold"), anchor="w")
+
+notebook = ttk.Notebook(root)
+notebook.pack(fill=tk.BOTH, expand=True, padx=14, pady=(4, 14))
+
+
+# ── Helper to build a tab's fields (no button — caller adds it) ────────────
+def build_tab(parent, default_curl_text, default_json_text, default_name_suffix=""):
+    frame = ttk.Frame(parent, padding="18")
+
+    # 1. Curl
+    ttk.Label(frame, text="1. Paste Your Curl Command String:").pack(anchor=tk.W, pady=(0, 3))
+    text_curl = tk.Text(frame, height=6, font=("Courier", 10), wrap=tk.WORD,
+                        borderwidth=1, relief="solid",
+                        bg=TEXT_BG, fg=TEXT_FG,
+                        highlightthickness=1, highlightbackground=BORDER,
+                        highlightcolor=ACCENT,
+                        insertbackground=ACCENT,
+                        selectbackground=PRIMARY, selectforeground="#ffffff")
+    text_curl.pack(fill=tk.X, pady=(0, 12))
+    text_curl.insert("1.0", default_curl_text)
+
+    # 2. Feature Class Name (auto-fills on paste)
+    ttk.Label(frame, text="2. Feature Class Name:").pack(anchor=tk.W, pady=(5, 3))
+    entry_name = ttk.Entry(frame, font=("Helvetica", 11))
+    entry_name.pack(fill=tk.X, pady=(0, 16))
+
+    def parse_name():
+        pascal, _ = extract_feature_and_endpoint_from_url(text_curl.get("1.0", tk.END).strip())
+        final = pascal
+        if default_name_suffix:
+            if pascal.lower().endswith(default_name_suffix.lower()):
+                final = pascal
+            else:
+                final = pascal + default_name_suffix
+        entry_name.delete(0, tk.END)
+        entry_name.insert(0, final)
+
+    def on_curl_modified(event=None):
+        parse_name()
+        text_curl.edit_modified(False)
+
+    text_curl.bind("<<Modified>>", on_curl_modified)
+    parse_name()
+
+    # 3. JSON Payload
+    ttk.Label(frame, text="3. Paste JSON Output Data Payload Here:").pack(anchor=tk.W, pady=(0, 3))
+    text_json = tk.Text(frame, height=14, font=("Courier", 10), wrap=tk.WORD,
+                        borderwidth=1, relief="solid",
+                        bg=TEXT_BG, fg=TEXT_FG,
+                        highlightthickness=1, highlightbackground=BORDER,
+                        highlightcolor=ACCENT,
+                        insertbackground=ACCENT,
+                        selectbackground=PRIMARY, selectforeground="#ffffff")
+    text_json.pack(fill=tk.BOTH, expand=True, pady=(0, 16))
+    text_json.insert("1.0", default_json_text)
+
+    def get_data():
+        return entry_name.get(), text_json.get("1.0", tk.END), text_curl.get("1.0", tk.END)
+
+    return frame, get_data
+
+
+def create_card(parent, title=None):
+    """Create a white card with a subtle border to group fields."""
+    outer = tk.Frame(parent, bg=BORDER)
+    inner = tk.Frame(outer, bg=TEXT_BG, padx=12, pady=12)
+    outer.pack(fill=tk.X, pady=(8, 12))
+    inner.pack(fill=tk.BOTH, expand=True)
+    return inner
+
+
+def build_data_entry_form(parent):
+    """Create a modern, card-based data entry form."""
+    frame = ttk.Frame(parent, padding=18)
+
+    # User Information
+    user_card = create_card(frame)
+    user_card.grid_columnconfigure(0, weight=0)
+    user_card.grid_columnconfigure(1, weight=1)
+    ttk.Label(user_card, text="User Information", style="Heading.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+    fields = [("First name", ""), ("Last name", ""), ("Email", ""), ("Phone", "")]
+    for i, (label_text, _) in enumerate(fields):
+        row = i + 1
+        ttk.Label(user_card, text=label_text).grid(row=row, column=0, sticky="w", pady=8)
+        ent = ttk.Entry(user_card)
+        ent.grid(row=row, column=1, sticky="ew", padx=(12, 0), pady=8)
+
+    # Registration Status
+    status_card = create_card(frame)
+    status_card.grid_columnconfigure(1, weight=1)
+    ttk.Label(status_card, text="Registration Status", style="Heading.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+    ttk.Label(status_card, text="Status").grid(row=1, column=0, sticky="w", pady=8)
+    status_cb = ttk.Combobox(status_card, values=["Active", "Pending", "Inactive"], state="readonly")
+    status_cb.current(0)
+    status_cb.grid(row=1, column=1, sticky="ew", padx=(12, 0))
+
+    ttk.Label(status_card, text="Priority").grid(row=2, column=0, sticky="w", pady=8)
+    spin = tk.Spinbox(status_card, from_=1, to=10, bd=0, relief="flat")
+    spin.grid(row=2, column=1, sticky="w", padx=(12, 0))
+
+    # Terms & Conditions
+    terms_card = create_card(frame)
+    ttk.Label(terms_card, text="Terms & Conditions", style="Heading.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+    chk_var = tk.IntVar()
+    ttk.Checkbutton(terms_card, text="I agree to the terms and privacy policy", variable=chk_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=8)
+
+    # Action
+    btn_frame = ttk.Frame(frame)
+    btn_frame.pack(fill=tk.X, pady=(12, 0))
+    ttk.Button(btn_frame, text="Enter Data", style="Accent.TButton",
+               command=lambda: messagebox.showinfo("Saved", "Data entered successfully")).pack(side=tk.RIGHT, ipady=8)
+
+    return frame
+
+
+# ── Tab 1 — List API ────────────────────────────────────────────────────────
+default_curl_list = r'''curl ^"https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat/tugs-and-pilot-get-all-boats?page=0^&size=10^&search=^&_=1779192734934^" ^
   -H ^"Accept: application/json, text/javascript, */*; q=0.01^" ^
   -H ^"Accept-Language: en^" ^
   -H ^"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJSMFU3LXVvTnowbThienVlQW1JMVRiYU5HeDNLdVpPWE43a2RncVpXWlQ0In0^" ^
@@ -419,36 +961,8 @@ default_curl = r'''curl ^"https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat/
   -H ^"Referer: https://q-pmis2.tabadul.sa/pilot-memo-activity/boat-master-listing^" ^
   -H ^"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36^" ^
   -H ^"X-Requested-With: XMLHttpRequest^"'''
-text_curl.insert("1.0", default_curl)
 
-# 2. Feature Class Name (auto-fills on paste)
-ttk.Label(main_frame, text="2. Feature Class Name:").pack(anchor=tk.W, pady=(5, 2))
-entry_custom_name = ttk.Entry(main_frame, font=("Helvetica", 11))
-entry_custom_name.pack(fill=tk.X, pady=(0, 15))
-
-def on_click_parse_name():
-    curl_content = text_curl.get("1.0", tk.END).strip()
-    predicted_pascal, _ = extract_feature_and_endpoint_from_url(curl_content)
-    entry_custom_name.delete(0, tk.END)
-    entry_custom_name.insert(0, predicted_pascal)
-
-def on_curl_changed(event=None):
-    on_click_parse_name()
-    text_curl.edit_modified(False)
-
-text_curl.bind("<<Modified>>", on_curl_changed)
-on_click_parse_name()
-
-# 3. Payload JSON Input Box
-ttk.Label(main_frame, text="3. Paste JSON Output Data Payload Here:").pack(anchor=tk.W, pady=(0, 2))
-text_json = tk.Text(main_frame, height=14, font=("Courier", 10), wrap=tk.WORD,
-                    borderwidth=0, relief="flat",
-                    bg=TEXT_BG, fg=TEXT_FG,
-                    insertbackground=PRIMARY,
-                    selectbackground=PRIMARY, selectforeground=LABEL_FG)
-text_json.pack(fill=tk.BOTH, expand=True, pady=(0, 20))
-
-dummy_json = """{
+default_json_list = """{
     "responseCode": 200,
     "responseMessage": "SUCCESS",
     "data": {
@@ -506,19 +1020,90 @@ dummy_json = """{
         "empty": false
     }
 }"""
-text_json.insert("1.0", dummy_json)
 
-def on_generate():
-    process_generation(
-        raw_feature_name=entry_custom_name.get(),
-        raw_json=text_json.get("1.0", tk.END),
-        raw_curl_str=text_curl.get("1.0", tk.END)
-    )
+tab1_frame, get_list_data = build_tab(notebook, default_curl_list, default_json_list)
 
-btn_generate = ttk.Button(main_frame, text="🚀 Generate Data Architecture",
-                           command=on_generate, style="Accent.TButton")
-btn_generate.pack(fill=tk.X, ipady=12)
+def on_list_generate():
+    name, json_str, curl = get_list_data()
+    process_generation(raw_feature_name=name, raw_json=json_str, raw_curl_str=curl)
 
+ttk.Button(tab1_frame, text="🚀 Generate List Architecture",
+           command=on_list_generate, style="Accent.TButton").pack(fill=tk.X, ipady=12)
+notebook.add(tab1_frame, text="  📋 List API  ")
+
+
+# ── Tab 2 — Details API ─────────────────────────────────────────────────────
+default_curl_details = r'''curl ^"https://qapigw.tabadul.sa/tabadul/pmis2/vesselcargo/stowage-instructions/by-crn?crn=20250508000193^" ^
+  -H ^"Accept: application/json, text/plain, */*^" ^
+  -H ^"Accept-Language: en^" ^
+  -H ^"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJSMFU3LXVvTnowbThienVlQW1JMVRiYU5HeDNLdVpPWE43a2RncVpXWlQ0In0.eyJleHAiOjE3ODAzMDgzNzIsImlhdCI6MTc4MDMwNjU3MiwiYXV0aF90aW1lIjoxNzgwMzA2NTcwLCJqdGkiOiI4NTIzZmJjNS0xODNjLTQ3M2QtYWFiOC0zMWRkNDUzZTM4Y2IiLCJpc3MiOiJodHRwczovL3EtcG1pczIudGFiYWR1bC5zYS9hdXRoL3JlYWxtcy9QTUlTIiwiYXVkIjpbInJlYWxtLW1hbmFnZW1lbnQiLCJhY2NvdW50Il0sInN1YiI6IjkzMjM2NWU0LTI5NDEtNDI2NC04MjEyLTM4ZTgyMzQzMTU2NiIsInR5cCI6IkJlYXJlciIsImF6cCI6IlBNSVNfY2xpZW50Iiwibm9uY2UiOiJkY2U0YTU2YS05ZGNiLTQ3N2QtYTVkYi03MjY5OWIwMzRjZWEiLCJzZXNzaW9uX3N0YXRlIjoiNzY5NTQ0NGEtN2ZlMC00YWZlLTkzZDYtMzIwNjRiOGVkYTI3IiwiYWxsb3dlZC1vcmlnaW5zIjpbImh0dHBzOi8vcS1wbWlzMi50YWJhZHVsLnNhIiwiaHR0cHM6Ly91LXBtaXMudGFiYWR1bC5zYSJdLCJyZWFsbV9hY2Nlc3MiOnsicm9sZXMiOlsicG1pc3VzZXIiLCJQT0FETSIsIm9mZmxpbmVfYWNjZXNzIiwiZGVmYXVsdC1yb2xlcy1wbWlzIiwidW1hX2F1dGhvcml6YXRpb24iLCJQTyJdfSwicmVzb3VyY2VfYWNjZXNzIjp7InJlYWxtLW1hbmFnZW1lbnQiOnsicm9sZXMiOlsibWFuYWdlLXVzZXJzIiwidmlldy11c2VycyIsInF1ZXJ5LWdyb3VwcyIsInF1ZXJ5LXVzZXJzIl19LCJhY2NvdW50Ijp7InJvbGVzIjpbIm1hbmFnZS1hY2NvdW50IiwibWFuYWdlLWFjY291bnQtbGlua3MiLCJ2aWV3LXByb2ZpbGUiXX19LCJzY29wZSI6Im9wZW5pZCBwcm9maWxlIGVtYWlsIHBtaXN1c2VyIiwic2lkIjoiNzY5NTQ0NGEtN2ZlMC00YWZlLTkzZDYtMzIwNjRiOGVkYTI3IiwiZW1haWxfdmVyaWZpZWQiOmZhbHNlLCJwcmVmZXJyZWRfdXNlcm5hbWUiOiJkYW0wMDEiLCJsb2NhbGUiOiJlbiIsImVtYWlsIjoidGVzdEB0ZXN0LnNhIn0.zI6L-rNcxUkzTJiqy_P2gPhWJKh8txZjqsRbove3z-TzciBDOmNnHE9WAhPwRtNRbaOEO97F8hiCEPhD7Qkj11p7mUzJKyDrIqDRS4mTo23Qn83VARn2jzsbXH5mr34BmNblzM2dF1cD-5mBzSjDdB8oU3jHwHcCQKki7DImNokBtUYiwU8hgU_sYL6Z6Sbsf4pTjyhInXcRbzmY5IjJeaSFhY0PBCnfmBq62oUWgc4253kKos1-HKO0lXlE1P-vn3NRLdiGmrDQfMosfP3frreoqQm016RKFMn9wWpFXgoM_WzKLeSSNGlG2qHQYvIAcqkiH3cfwdV7qoVdxnIBBw^" ^
+  -H ^"Connection: keep-alive^" ^
+  -H ^"Content-Type: text^" ^
+  -H ^"Origin: https://q-pmis2.tabadul.sa^" ^
+  -H ^"Referer: https://q-pmis2.tabadul.sa/^" ^
+  -H ^"Sec-Fetch-Dest: empty^" ^
+  -H ^"Sec-Fetch-Mode: cors^" ^
+  -H ^"Sec-Fetch-Site: same-site^" ^
+  -H ^"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36^" ^
+  -H ^"sec-ch-ua: ^\^"Chromium^\^";v=^\^"148^\^", ^\^"Google Chrome^\^";v=^\^"148^\^", ^\^"Not/A)Brand^\^";v=^\^"99^\^"^" ^
+  -H ^"sec-ch-ua-mobile: ?0^" ^
+  -H ^"sec-ch-ua-platform: ^\^"Windows^\^"^"'''
+
+default_json_details = """{
+    "responseCode": null,
+    "responseMessage": null,
+    "data": {
+        "id": 100011,
+        "crn": 20250508000193,
+        "voyageRid": 121874,
+        "filePath": "temp/stowage_instruction",
+        "isDraft": false,
+        "branchId": "lizj",
+        "orgId": "nwze0001",
+        "portId": 8,
+        "noOfContainers": 1,
+        "vcn": "DAM0121884",
+        "callSign": "1234567",
+        "imoNo": 5616306,
+        "voyageNo": "12",
+        "terminalOperatorCode": 2029,
+        "igmNo": null,
+        "igmDate": null,
+        "rotationNo": null,
+        "countryOfVessel": "Aland Islands",
+        "portOrgName": "SIYANCO SAUDI",
+        "orgName": null,
+        "nationality": 266,
+        "rotationNoDate": null,
+        "expectedDOA": "2025-05-08T22:12",
+        "vesselName": "vesselName English",
+        "shippingAgent": "Adam Yassein",
+        "shippingAgentCode": "nwze0001-123",
+        "status": "Submitted",
+        "totalContainer": 1,
+        "containers": []
+    }
+}"""
+
+tab2_frame, get_details_data = build_tab(notebook, default_curl_details, default_json_details, default_name_suffix='Details')
+
+def on_combined_generate():
+    list_name, list_json, list_curl   = get_list_data()
+    _,         det_json,  det_curl    = get_details_data()
+    process_combined_generation(list_name, list_json, list_curl, det_json, det_curl)
+
+ttk.Button(tab2_frame, text="🚀 Generate List + Details Architecture",
+           command=on_combined_generate, style="Accent.TButton").pack(fill=tk.X, ipady=12)
+notebook.add(tab2_frame, text="  🔍 Details API  ")
+
+import sys
+if "--generate-default-details" in sys.argv:
+    try:
+        name, json_str, curl = get_details_data()
+        process_generation(raw_feature_name=name, raw_json=json_str, raw_curl_str=curl, show_message=False)
+        print("Generated files for Details on Desktop.")
+    except Exception as e:
+        print("Generation failed:", e)
+    sys.exit(0)
 root.mainloop()
 
-root.mainloop()
