@@ -438,20 +438,6 @@ def generate_details_model_code(feature_name, snake_name, camel_name, details_da
     if not isinstance(data_obj, dict):
         data_obj = {}
 
-    # Detect an identifier key that should be normalized to 'id' in the model
-    identifier_key = None
-    if 'id' in data_obj:
-        identifier_key = 'id'
-    else:
-        camel_id = f"{camel_name}id".lower()
-        snake_id = f"{snake_name}_id".lower()
-        feature_id = feature_name.lower() + 'id'
-        for k in data_obj.keys():
-            lk = k.lower()
-            if lk == camel_id or lk == snake_id or lk == feature_id:
-                identifier_key = k
-                break
-
     model_code = f"import 'package:dart_mappable/dart_mappable.dart';\n\n"
     model_code += f"part '{snake_name}_details_model.mapper.dart';\n\n"
 
@@ -463,25 +449,15 @@ def generate_details_model_code(feature_name, snake_name, camel_name, details_da
     model_code += f"@MappableClass(ignoreNull: true)\nclass {feature_name}Details with {feature_name}DetailsMappable {{\n"
     if data_obj:
         for k, v in data_obj.items():
-            # If this key is chosen as the identifier, expose it as 'id' while mapping from original key
-            field_name = k
-            annotation = ""
-            if identifier_key and k == identifier_key and k != 'id':
-                annotation = f"  @MappableField(key: \"{k}\")\n"
-                field_name = 'id'
-
             if isinstance(v, list):
-                model_code += f"{annotation}  final List<dynamic>? {field_name};\n"
+                model_code += f"  final List<dynamic>? {k};\n"
             elif isinstance(v, dict):
-                model_code += f"{annotation}  final dynamic {field_name};\n"
+                model_code += f"  final dynamic {k};\n"
             else:
-                model_code += f"{annotation}  final {get_dart_type(v, k, feature_name)} {field_name};\n"
+                model_code += f"  final {get_dart_type(v, k, feature_name)} {k};\n"
         model_code += f"\n  {feature_name}Details({{\n"
         for k in data_obj.keys():
-            if identifier_key and k == identifier_key and k != 'id':
-                model_code += f"    this.id,\n"
-            else:
-                model_code += f"    this.{k},\n"
+            model_code += f"    this.{k},\n"
         model_code += "  });\n}"
     else:
         model_code += "  final int? id;\n\n"
@@ -493,32 +469,92 @@ def generate_details_model_code(feature_name, snake_name, camel_name, details_da
 # -------------------------------------------------------------
 # COMBINED SERVICE CODE GENERATOR (list + details)
 # -------------------------------------------------------------
-def generate_combined_service_code(feature_name, snake_name, camel_name, list_url, details_url, list_curl=None):
-    query_params = extract_query_params_from_url(list_curl) if list_curl else {}
-    
-    if query_params:
-        method_params_lines = []
-        params_map_lines = []
-        for key, value in query_params.items():
+def generate_combined_service_code(feature_name, snake_name, camel_name, list_url, details_url, list_curl=None, details_curl=None):
+    list_query_params = extract_query_params_from_url(list_curl) if list_curl else {}
+
+    if list_query_params:
+        list_method_params_lines = []
+        list_params_map_lines = []
+        for key, value in list_query_params.items():
             if key == '_':
                 continue
             if key == 'page':
-                method_params_lines.append(f"    required int {key},")
-                params_map_lines.append(f'      "{key}": {key}.toString(),')
+                list_method_params_lines.append(f"    required int {key},")
+                list_params_map_lines.append(f'      "{key}": {key}.toString(),')
             elif key == 'size':
-                method_params_lines.append(f"    int {key} = 10,")
-                params_map_lines.append(f'      "{key}": {key}.toString(),')
+                list_method_params_lines.append(f"    int {key} = 10,")
+                list_params_map_lines.append(f'      "{key}": {key}.toString(),')
             elif key == 'search':
-                method_params_lines.append(f"    String {key} = '',")
-                params_map_lines.append(f'      "{key}": {key},')
+                list_method_params_lines.append(f"    String {key} = '',")
+                list_params_map_lines.append(f'      "{key}": {key},')
             else:
-                method_params_lines.append(f"    String? {key},")
-                params_map_lines.append(f'      if ({key} != null) "{key}": {key},')
-        method_params_str = "\n".join(method_params_lines)
-        params_map_str = "\n".join(params_map_lines)
+                list_method_params_lines.append(f"    String? {key},")
+                list_params_map_lines.append(f'      if ({key} != null) "{key}": {key},')
+        list_method_params_str = "\n".join(list_method_params_lines)
+        list_params_map_str = "\n".join(list_params_map_lines)
     else:
-        method_params_str = "    required String crn,"
-        params_map_str = '      "crn": crn,'
+        list_method_params_str = "    required String crn,"
+        list_params_map_str = '      "crn": crn,'
+
+    details_query_params = extract_query_params_from_url(details_curl) if details_curl else {}
+    if details_query_params:
+        details_method_params_lines = []
+        details_params_map_lines = []
+        for key, value in details_query_params.items():
+            if key == '_':
+                continue
+            if key == 'page':
+                details_method_params_lines.append(f"    required int {key},")
+                details_params_map_lines.append(f'      "{key}": {key}.toString(),')
+            elif key == 'size':
+                details_method_params_lines.append(f"    int {key} = 10,")
+                details_params_map_lines.append(f'      "{key}": {key}.toString(),')
+            else:
+                # treat details params as required strings (e.g., crn)
+                details_method_params_lines.append(f"    required String {key},")
+                details_params_map_lines.append(f'      "{key}": {key},')
+        details_method_params_str = "\n".join(details_method_params_lines)
+        details_params_map_str = "\n".join(details_params_map_lines)
+
+        details_method_block = f"""  Future<Result<{feature_name}DetailsResponse, AppException>> get{feature_name}ById({{
+{details_method_params_str}
+    CancelToken? cancelToken,
+  }}) async {{
+    final params = {{
+{details_params_map_str}
+    }};
+    try {{
+      return await safeApiCall(() async {{
+        final jsonResponse = await NetworkHandler.getRequest(
+          headers: await NetworkHandler.getCommonHeaders(),
+          endpoint: '{details_url}',
+          params: params,
+          cancelToken: cancelToken,
+        );
+        return Success({feature_name}DetailsResponseMapper.fromMap(jsonResponse));
+      }});
+    }} catch (e) {{
+      return Error(e as AppException);
+    }}
+  }}\n\n"""
+    else:
+        details_method_block = f"""  Future<Result<{feature_name}DetailsResponse, AppException>> get{feature_name}ById({{
+    required int id,
+    CancelToken? cancelToken,
+  }}) async {{
+    try {{
+      return await safeApiCall(() async {{
+        final jsonResponse = await NetworkHandler.getRequest(
+          headers: await NetworkHandler.getCommonHeaders(),
+          endpoint: '{details_url}/$id',
+          cancelToken: cancelToken,
+        );
+        return Success({feature_name}DetailsResponseMapper.fromMap(jsonResponse));
+      }});
+    }} catch (e) {{
+      return Error(e as AppException);
+    }}
+  }}\n\n"""
 
     return f"""import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -531,11 +567,11 @@ import '../models/{snake_name}_details_model.dart';
 
 class {feature_name}ManagementService {{
   Future<Result<{feature_name}Response, AppException>> get{feature_name}Details({{
-{method_params_str}
+{list_method_params_str}
     CancelToken? cancelToken,
   }}) async {{
     final params = {{
-{params_map_str}
+{list_params_map_str}
     }};
     try {{
       return await safeApiCall(() async {{
@@ -552,24 +588,7 @@ class {feature_name}ManagementService {{
     }}
   }}
 
-  Future<Result<{feature_name}DetailsResponse, AppException>> get{feature_name}ById({{
-    required int id,
-    CancelToken? cancelToken,
-  }}) async {{
-    try {{
-      return await safeApiCall(() async {{
-        final jsonResponse = await NetworkHandler.getRequest(
-          headers: await NetworkHandler.getCommonHeaders(),
-          endpoint: '{details_url}/$id',
-          cancelToken: cancelToken,
-        );
-        return Success({feature_name}DetailsResponseMapper.fromMap(jsonResponse));
-      }});
-    }} catch (e) {{
-      return Error(e as AppException);
-    }}
-  }}
-}}
+{details_method_block}}}
 
 final {camel_name}ServiceProvider = Provider.autoDispose<{feature_name}ManagementService>((ref) {{
   return {feature_name}ManagementService();
@@ -579,8 +598,44 @@ final {camel_name}ServiceProvider = Provider.autoDispose<{feature_name}Managemen
 # -------------------------------------------------------------
 # DETAILS NOTIFIER CODE GENERATOR
 # -------------------------------------------------------------
-def generate_details_notifier_code(feature_name, snake_name, camel_name):
-    return f"""import 'dart:async';
+def generate_details_notifier_code(feature_name, snake_name, camel_name, details_curl=None):
+    details_query_params = extract_query_params_from_url(details_curl) if details_curl else {}
+    # If details endpoint expects a 'crn' query param, generate notifier that accepts String parameter
+    if 'crn' in details_query_params:
+        return f"""import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mawani_pmis/utils/extension/cancel_extension.dart';
+import 'package:mawani_pmis/utils/extension/result_extension.dart';
+import '../models/{snake_name}_details_model.dart';
+import '../services/{snake_name}_service.dart';
+
+class {feature_name}DetailsViewNotifier extends AutoDisposeFamilyAsyncNotifier<{feature_name}Details?, String> {{
+
+  @override
+  FutureOr<{feature_name}Details?> build(String id) async {{
+    state = const AsyncLoading();
+    try {{
+      final result = await ref.watch({camel_name}ServiceProvider).get{feature_name}ById(
+        crn: id,
+        cancelToken: ref.cancelToken(),
+      );
+
+      final response = result.getOrThrowError();
+      return response.{camel_name}Details;
+    }} catch (e) {{
+      state = AsyncError(e, StackTrace.current);
+      return null;
+    }}
+  }}
+}}
+
+final {camel_name}DetailsNotifierProvider = AsyncNotifierProvider.autoDispose
+    .family<{feature_name}DetailsViewNotifier, {feature_name}Details?, String>(
+  {feature_name}DetailsViewNotifier.new,
+  name: "{feature_name}DetailsNotifier",
+);"""
+    else:
+        return f"""import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mawani_pmis/utils/extension/cancel_extension.dart';
 import 'package:mawani_pmis/utils/extension/result_extension.dart';
@@ -613,11 +668,10 @@ final {camel_name}DetailsNotifierProvider = AsyncNotifierProvider.autoDispose
   name: "{feature_name}DetailsNotifier",
 );"""
 
-
 # -------------------------------------------------------------
 # DETAILS VIEW CODE GENERATOR
 # -------------------------------------------------------------
-def generate_details_view_code(feature_name, snake_name, camel_name, details_data):
+def generate_details_view_code(feature_name, snake_name, camel_name, details_data, details_curl=None):
     data_obj = details_data.get("data", {})
     if not isinstance(data_obj, dict):
         data_obj = {}
@@ -638,6 +692,9 @@ def generate_details_view_code(feature_name, snake_name, camel_name, details_dat
     else:
         detail_fields = f"                      TitleSubtitleModel(\n                        title: \"Id\",\n                        subTitle: data.id?.toString() ?? \"-\",\n                      ),\n"
 
+    details_query = extract_query_params_from_url(details_curl) if details_curl else {}
+    id_type = "String" if "crn" in details_query else "int"
+
     return f"""import 'package:auto_route/auto_route.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -653,13 +710,13 @@ import '../notifiers/{snake_name}_details_notifier.dart';
 
 @RoutePage()
 class {feature_name}DetailsView extends ConsumerWidget {{
-  final int {camel_name}Id;
+  final {id_type} id;
 
-  const {feature_name}DetailsView({{super.key, required this.{camel_name}Id}});
+  const {feature_name}DetailsView({{super.key, required this.id}});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {{
-    final detailsAsync = ref.watch({camel_name}DetailsNotifierProvider({camel_name}Id));
+    final detailsAsync = ref.watch({camel_name}DetailsNotifierProvider(id));
 
     return CommonBackground(
       appBar: const CommonAppBar(appBarTitle: "{list_title} Details"),
@@ -687,15 +744,14 @@ class {feature_name}DetailsView extends ConsumerWidget {{
         error: (error, stack) {{
           return CommonErrorWidget(
             error,
-            reload: () => ref.invalidate({camel_name}DetailsNotifierProvider({camel_name}Id)),
+            reload: () => ref.invalidate({camel_name}DetailsNotifierProvider(id)),
           );
         }},
-        loading: () => const CommonCircularProgress(),
+        loading: () => CommonCircularProgress(),
       ),
     );
   }}
 }}"""
-
 
 # -------------------------------------------------------------
 # COMBINED GENERATION (list + details)
@@ -732,9 +788,9 @@ def process_combined_generation(list_name, list_json_str, list_curl, details_jso
 
     try:
         details_model_code    = generate_details_model_code(feature_name, snake_name, camel_name, details_data)
-        combined_service_code = generate_combined_service_code(feature_name, snake_name, camel_name, list_url, details_url, list_curl=list_curl)
-        details_notifier_code = generate_details_notifier_code(feature_name, snake_name, camel_name)
-        details_view_code     = generate_details_view_code(feature_name, snake_name, camel_name, details_data)
+        combined_service_code = generate_combined_service_code(feature_name, snake_name, camel_name, list_url, details_url, list_curl=list_curl, details_curl=details_curl)
+        details_notifier_code = generate_details_notifier_code(feature_name, snake_name, camel_name, details_curl=details_curl)
+        details_view_code     = generate_details_view_code(feature_name, snake_name, camel_name, details_data, details_curl=details_curl)
 
         with open(os.path.join(models_dir,    f"{snake_name}_details_model.dart"), "w") as f:
             f.write(details_model_code)
@@ -843,7 +899,7 @@ notebook.pack(fill=tk.BOTH, expand=True, padx=14, pady=(4, 14))
 
 
 # ── Helper to build a tab's fields (no button — caller adds it) ────────────
-def build_tab(parent, default_curl_text, default_json_text, default_name_suffix=""):
+def build_tab(parent, default_curl_text, default_json_text):
     frame = ttk.Frame(parent, padding="18")
 
     # 1. Curl
@@ -865,14 +921,8 @@ def build_tab(parent, default_curl_text, default_json_text, default_name_suffix=
 
     def parse_name():
         pascal, _ = extract_feature_and_endpoint_from_url(text_curl.get("1.0", tk.END).strip())
-        final = pascal
-        if default_name_suffix:
-            if pascal.lower().endswith(default_name_suffix.lower()):
-                final = pascal
-            else:
-                final = pascal + default_name_suffix
         entry_name.delete(0, tk.END)
-        entry_name.insert(0, final)
+        entry_name.insert(0, pascal)
 
     def on_curl_modified(event=None):
         parse_name()
@@ -1085,7 +1135,7 @@ default_json_details = """{
     }
 }"""
 
-tab2_frame, get_details_data = build_tab(notebook, default_curl_details, default_json_details, default_name_suffix='Details')
+tab2_frame, get_details_data = build_tab(notebook, default_curl_details, default_json_details)
 
 def on_combined_generate():
     list_name, list_json, list_curl   = get_list_data()
@@ -1096,14 +1146,5 @@ ttk.Button(tab2_frame, text="🚀 Generate List + Details Architecture",
            command=on_combined_generate, style="Accent.TButton").pack(fill=tk.X, ipady=12)
 notebook.add(tab2_frame, text="  🔍 Details API  ")
 
-import sys
-if "--generate-default-details" in sys.argv:
-    try:
-        name, json_str, curl = get_details_data()
-        process_generation(raw_feature_name=name, raw_json=json_str, raw_curl_str=curl, show_message=False)
-        print("Generated files for Details on Desktop.")
-    except Exception as e:
-        print("Generation failed:", e)
-    sys.exit(0)
 root.mainloop()
 
