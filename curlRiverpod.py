@@ -65,6 +65,9 @@ def extract_feature_and_endpoint_from_url(curl_str):
                 # If the last segment looks like a 'by-...' qualifier or an id placeholder, use the previous segment
                 if re.match(r'^(by[-_].+|byid|by-id|by)$', target_segment.lower()) and len(segments) > 1:
                     target_segment = segments[-2]
+                # If last segment ends with a qualifier like '-crn' or '-id', use previous segment as the feature name
+                if re.search(r'[-_](crn|id)$', target_segment.lower()) and len(segments) > 1:
+                    target_segment = segments[-2]
                 if re.search(r'\{.+\}', target_segment) and len(segments) > 1:
                     target_segment = segments[-2]
                 # If target looks numeric, use previous segment
@@ -776,6 +779,11 @@ def process_combined_generation(list_name, list_json_str, list_curl, details_jso
     snake_name   = camel_to_snake(list_name)
     camel_name   = to_camel_case(list_name)
 
+    # Use list-derived feature name for both list and details (append 'Details' for clarity in class names)
+    details_feature_name = feature_name + "Details"
+    details_snake_name = snake_name + "_details"
+    details_camel_name = camel_name + "Details"
+
     _, list_url    = extract_feature_and_endpoint_from_url(list_curl)
     _, details_url = extract_feature_and_endpoint_from_url(details_curl)
 
@@ -1141,6 +1149,8 @@ def on_combined_generate():
     list_name, list_json, list_curl   = get_list_data()
     _,         det_json,  det_curl    = get_details_data()
     process_combined_generation(list_name, list_json, list_curl, det_json, det_curl)
+    # ensure details feature name uses list_name + 'Details' rather than derived endpoint name
+
 
 ttk.Button(tab2_frame, text="🚀 Generate List + Details Architecture",
            command=on_combined_generate, style="Accent.TButton").pack(fill=tk.X, ipady=12)
