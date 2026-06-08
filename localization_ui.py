@@ -7,7 +7,11 @@ import urllib.request
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-API_URL = "https://qapigw.tabadul.sa/tabadul/pmis2/lookupmaster/localization/locale-map?module=RPA,GENERAL"
+API_URL = (
+    "https://qapigw.tabadul.sa/tabadul/pmis2/mobileapi/lookupmaster/localization/"
+    "locale-map?module=ALTCNF%2CCCM%2CDMR%2CDMRG%2CDRPT%2CExceptionMessages%2CGENERAL"
+    "%2CLKP%2CMENU%2CRPA%2CTP%2CT_P%2CUSRMGMT%2CVCOM%2CVVM%2CV_I"
+)
 PROJECT_ROOT = os.path.expanduser("/Users/mohammadabumaizer/Documents/pmis-flutter")
 BASE_URL_PREFIX = "https://qapigw.tabadul.sa/tabadul/pmis2"
 
@@ -178,6 +182,7 @@ class LocalizationApp:
         self.status_var = tk.StringVar(value="Idle")
         ttk.Label(top, textvariable=self.status_var).pack(side=tk.LEFT, padx=10)
 
+        # Search bar
         search_frame = ttk.Frame(tab1, padding=(10, 4))
         search_frame.pack(fill=tk.X)
 
@@ -206,9 +211,10 @@ class LocalizationApp:
         ttk.Label(prog_frame, textvariable=self.percent_var, width=6).pack(side=tk.LEFT, padx=8)
 
         paned = tk.PanedWindow(tab1, orient=tk.HORIZONTAL, sashwidth=6,
-                               sashrelief=tk.RAISED, background="#444")
+                               sashrelief=tk.RAISED, background="#ccc")
         paned.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
+        # Left: output text
         left_frame = ttk.Frame(paned, padding=(4, 4, 0, 4))
         paned.add(left_frame, stretch="always", minsize=400)
 
@@ -222,11 +228,13 @@ class LocalizationApp:
         xscroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.text.tag_configure("header", foreground="#569cd6", font=("Menlo", 13, "bold"))
+        self.text.tag_configure("header", foreground="#569cd6",
+                                font=("Menlo", 13, "bold"))
         self.text.tag_configure("info", foreground="#888")
         self.text.tag_configure("search_match", background="#5a4a00", foreground="#ffd54f")
         self.text.tag_configure("search_current", background="#ff8f00", foreground="#000")
 
+        # Right: notes panel
         right_frame = ttk.Frame(paned, padding=(0, 4, 4, 4))
         paned.add(right_frame, stretch="never", minsize=280, width=350)
 
