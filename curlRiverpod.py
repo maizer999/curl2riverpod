@@ -92,7 +92,7 @@ def get_dart_type(value, key, feature_name):
         return f"{feature_name}{key.capitalize()}?"
     return "dynamic"
 
-def process_generation(raw_feature_name, raw_json, raw_curl_str, show_message=True):
+def process_generation(raw_feature_name, raw_json, raw_curl_str, show_message=True, details_curl=None):
     input_name = raw_feature_name.strip()
     if not input_name:
         messagebox.showerror("Error", "Feature Name cannot be empty.")
@@ -372,7 +372,7 @@ class __FEATURE_NAME__ListView extends StatelessWidget {
 __UI_DYNAMIC_FIELDS__                      ],
                       onTap: () {
                         context.navigateTo(
-                            __FEATURE_NAME__DetailsRoute(id: data.id ?? 0));
+                            __FEATURE_NAME__DetailsRoute(__DETAILS_ROUTE_ARG__));
                       },
                     );
                   },
@@ -399,7 +399,10 @@ __UI_DYNAMIC_FIELDS__                      ],
   }
 }"""
     list_title = pascal_to_title(feature_name)
-    view_code = view_template.replace("__FEATURE_NAME__", feature_name).replace("__SNAKE_NAME__", snake_name).replace("__CAMEL_NAME__", camel_name).replace("__UI_DYNAMIC_FIELDS__", dynamic_ui_fields).replace("__LIST_TITLE__", list_title)
+    # When the details endpoint is crn-based, navigate with crn instead of id
+    details_is_crn = 'crn' in extract_query_params_from_url(details_curl) if details_curl else False
+    details_route_arg = 'crn: data.crn ?? ""' if details_is_crn else 'id: data.id ?? 0'
+    view_code = view_template.replace("__FEATURE_NAME__", feature_name).replace("__SNAKE_NAME__", snake_name).replace("__CAMEL_NAME__", camel_name).replace("__UI_DYNAMIC_FIELDS__", dynamic_ui_fields).replace("__LIST_TITLE__", list_title).replace("__DETAILS_ROUTE_ARG__", details_route_arg)
 
     # -------------------------------------------------------------
     # WRITE FOLDERS AND FILES
@@ -693,7 +696,9 @@ def generate_details_view_code(feature_name, snake_name, camel_name, details_dat
         detail_fields = f"                      TitleSubtitleModel(\n                        title: \"Id\",\n                        subTitle: data.id?.toString() ?? \"-\",\n                      ),\n"
 
     details_query = extract_query_params_from_url(details_curl) if details_curl else {}
-    id_type = "String" if "crn" in details_query else "int"
+    is_crn = "crn" in details_query
+    id_type = "String" if is_crn else "int"
+    param_name = "crn" if is_crn else "id"
 
     return f"""import 'package:auto_route/auto_route.dart';
 import 'package:flutter/material.dart';
@@ -710,13 +715,13 @@ import '../notifiers/{snake_name}_details_notifier.dart';
 
 @RoutePage()
 class {feature_name}DetailsView extends ConsumerWidget {{
-  final {id_type} id;
+  final {id_type} {param_name};
 
-  const {feature_name}DetailsView({{super.key, required this.id}});
+  const {feature_name}DetailsView({{super.key, required this.{param_name}}});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {{
-    final detailsAsync = ref.watch({camel_name}DetailsNotifierProvider(id));
+    final detailsAsync = ref.watch({camel_name}DetailsNotifierProvider({param_name}));
 
     return CommonBackground(
       appBar: const CommonAppBar(appBarTitle: "{list_title} Details"),
@@ -744,7 +749,7 @@ class {feature_name}DetailsView extends ConsumerWidget {{
         error: (error, stack) {{
           return CommonErrorWidget(
             error,
-            reload: () => ref.invalidate({camel_name}DetailsNotifierProvider(id)),
+            reload: () => ref.invalidate({camel_name}DetailsNotifierProvider({param_name})),
           );
         }},
         loading: () => CommonCircularProgress(),
@@ -769,7 +774,7 @@ def process_combined_generation(list_name, list_json_str, list_curl, details_jso
         return
 
     # Generate list files first (reuses existing logic)
-    process_generation(list_name, list_json_str, list_curl, show_message=False)
+    process_generation(list_name, list_json_str, list_curl, show_message=False, details_curl=details_curl)
 
     # Derive naming from list name
     feature_name = clean_to_pascal(list_name)
@@ -1003,14 +1008,20 @@ def build_data_entry_form(parent):
 
 
 # ── Tab 1 — List API ────────────────────────────────────────────────────────
-default_curl_list = r'''curl ^"https://q-pmis2.tabadul.sa/api-gateway/tugspilot/boat/tugs-and-pilot-get-all-boats?page=0^&size=10^&search=^&_=1779192734934^" ^
+default_curl_list = r'''curl ^"https://qapigw.tabadul.sa/tabadul/pmis2/vesselcargo/bay-plan/v2/bay-plans?page=0^&size=10^&search=^&_=1781014505090^" ^
   -H ^"Accept: application/json, text/javascript, */*; q=0.01^" ^
   -H ^"Accept-Language: en^" ^
-  -H ^"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJSMFU3LXVvTnowbThienVlQW1JMVRiYU5HeDNLdVpPWE43a2RncVpXWlQ0In0^" ^
+  -H ^"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJSMFU3LXVvTnowbThienVlQW1JMVRiYU5HeDNLdVpPWE43a2RncVpXWlQ0In0.eyJleHAiOjE3ODEwMTYzMDUsImlhdCI6MTc4MTAxNDUwNSwiYXV0aF90aW1lIjoxNzgxMDE0NTA0LCJqdGkiOiIzOWQzMmZlYy1iNGJkLTQ3MzUtYmQyNC00Y2JmM2Y4YzdiMDMiLCJpc3MiOiJodHRwczovL3EtcG1pczIudGFiYWR1bC5zYS9hdXRoL3JlYWxtcy9QTUlTIiwiYXVkIjpbInJlYWxtLW1hbmFnZW1lbnQiLCJhY2NvdW50Il0sInN1YiI6IjkzMjM2NWU0LTI5NDEtNDI2NC04MjEyLTM4ZTgyMzQzMTU2NiIsInR5cCI6IkJlYXJlciIsImF6cCI6IlBNSVNfY2xpZW50Iiwibm9uY2UiOiJjN2NkMDI2YS01NDAwLTRkNTEtYmI4Yy05OWEyYTkxMjkwNmMiLCJzZXNzaW9uX3N0YXRlIjoiMWQxYzAzYTItMWM2MC00MzdiLWE3NDYtYzhkNjc2NzVkYzkwIiwiYWxsb3dlZC1vcmlnaW5zIjpbImh0dHBzOi8vcS1wbWlzMi50YWJhZHVsLnNhIiwiaHR0cHM6Ly91LXBtaXMudGFiYWR1bC5zYSJdLCJyZWFsbV9hY2Nlc3MiOnsicm9sZXMiOlsicG1pc3VzZXIiLCJQT0FETSIsIm9mZmxpbmVfYWNjZXNzIiwiZGVmYXVsdC1yb2xlcy1wbWlzIiwidW1hX2F1dGhvcml6YXRpb24iLCJQTyJdfSwicmVzb3VyY2VfYWNjZXNzIjp7InJlYWxtLW1hbmFnZW1lbnQiOnsicm9sZXMiOlsibWFuYWdlLXVzZXJzIiwidmlldy11c2VycyIsInF1ZXJ5LWdyb3VwcyIsInF1ZXJ5LXVzZXJzIl19LCJhY2NvdW50Ijp7InJvbGVzIjpbIm1hbmFnZS1hY2NvdW50IiwibWFuYWdlLWFjY291bnQtbGlua3MiLCJ2aWV3LXByb2ZpbGUiXX19LCJzY29wZSI6Im9wZW5pZCBwcm9maWxlIGVtYWlsIHBtaXN1c2VyIiwic2lkIjoiMWQxYzAzYTItMWM2MC00MzdiLWE3NDYtYzhkNjc2NzVkYzkwIiwiZW1haWxfdmVyaWZpZWQiOmZhbHNlLCJwcmVmZXJyZWRfdXNlcm5hbWUiOiJkYW0wMDEiLCJsb2NhbGUiOiJlbiIsImVtYWlsIjoidGVzdEB0ZXN0LnNhIn0.u2IguGI3mjRutVFF2AsEK2M2U28FlxCQN85505Gu5xgToxaDLtX4dCQ_AZ7oYx8YrntE1Ig-VoX2h0XlLXqDwOikUpzijYPzvL8NRPn-XmrrFrFLhAlYx8bIYudmg1kkLSYW1YTp0gMjif74HfirqyCE4p_gAUK8b073QLjTzrgFEZLt0mRkiM9JJFudaSQZELW8kQxJjvozB7YWPhZriS8JbqOgPsnDkfdFh0GUlyZSAW6HWpkhweKhZIcbwkD4OC2qLnlsUKYMEcRGcMOGZfbWGDFWK8XBNT9pJvo_qgrUXKjEmRWhX49LUYPzHdYH7tOiJg2TYNibktmBNQI14w^" ^
   -H ^"Connection: keep-alive^" ^
-  -H ^"Referer: https://q-pmis2.tabadul.sa/pilot-memo-activity/boat-master-listing^" ^
+  -H ^"Origin: https://q-pmis2.tabadul.sa^" ^
+  -H ^"Referer: https://q-pmis2.tabadul.sa/^" ^
+  -H ^"Sec-Fetch-Dest: empty^" ^
+  -H ^"Sec-Fetch-Mode: cors^" ^
+  -H ^"Sec-Fetch-Site: same-site^" ^
   -H ^"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36^" ^
-  -H ^"X-Requested-With: XMLHttpRequest^"'''
+  -H ^"sec-ch-ua: ^\^"Chromium^\^";v=^\^"148^\^", ^\^"Google Chrome^\^";v=^\^"148^\^", ^\^"Not/A)Brand^\^";v=^\^"99^\^"^" ^
+  -H ^"sec-ch-ua-mobile: ?0^" ^
+  -H ^"sec-ch-ua-platform: ^\^"Windows^\^"^"'''
 
 default_json_list = """{
     "responseCode": 200,
@@ -1018,55 +1029,49 @@ default_json_list = """{
     "data": {
         "content": [
             {
-                "boatCode": "56211",
-                "boatName": "AutoBoatname",
-                "createdDate": "21-10-2025 15:57:54",
-                "imoNo": 90336,
-                "id": 100083,
-                "status": null,
-                "boatTypeRid": 2400,
-                "boatClass": 2440,
-                "portRid": 8,
-                "boatTypeName": "Tugboat",
-                "boatClassName": "Conventional tug",
-                "ownType": "2402",
-                "ownTypeCode": null,
-                "ownTypeDesc": null,
-                "typeOfBasisPurpose": 2446,
-                "typeOfBasisPurposeDesc": null,
-                "email": "aa@test.com",
-                "contactNo": 654123456234,
-                "startDate": null,
-                "endDate": null,
-                "buildYear": 2025,
-                "buildType": 2455,
-                "buildTypeDesc": null,
-                "dimensions": null,
-                "draft": 234,
-                "capacity": null,
-                "grt": 234,
-                "topSpeed": 234,
-                "safety": [{"id": 100099, "safetyEquipmentTypeRid": 2467, "safetyEquipmentExpiryDate": null, "safetyEquipmentTypeName": null}],
-                "document": [{"id": 100072, "documentTypeRid": 1, "filePath": "1_1761051455.pdf", "documentValidityDate": "21-10-2025", "fileSizeKb": null, "fileType": null}],
-                "createdBy": "portoperator"
+                "crn": "20250507000112",
+                "vcn": "DAM0000914",
+                "vesselName": "vesselName English",
+                "imoNo": "8579298",
+                "createdDate": "07-05-2025",
+                "approvalStatusRid": "Submitted",
+                "updatedDate": "07-05-2025 14:21:07"
             }
         ],
         "pageable": {
             "pageNumber": 0,
             "pageSize": 10,
-            "sort": [],
+            "sort": [
+                {
+                    "direction": "DESC",
+                    "property": "updatedDate",
+                    "ignoreCase": false,
+                    "nullHandling": "NATIVE",
+                    "ascending": false,
+                    "descending": true
+                }
+            ],
             "offset": 0,
-            "unpaged": false,
-            "paged": true
+            "paged": true,
+            "unpaged": false
         },
-        "totalPages": 3,
-        "totalElements": 26,
-        "last": false,
+        "last": true,
+        "totalElements": 1,
+        "totalPages": 1,
         "size": 10,
         "number": 0,
-        "sort": [],
-        "numberOfElements": 10,
+        "sort": [
+            {
+                "direction": "DESC",
+                "property": "updatedDate",
+                "ignoreCase": false,
+                "nullHandling": "NATIVE",
+                "ascending": false,
+                "descending": true
+            }
+        ],
         "first": true,
+        "numberOfElements": 1,
         "empty": false
     }
 }"""
@@ -1077,16 +1082,16 @@ def on_list_generate():
     name, json_str, curl = get_list_data()
     process_generation(raw_feature_name=name, raw_json=json_str, raw_curl_str=curl)
 
-ttk.Button(tab1_frame, text="🚀 Generate List Architecture",
+ttk.Button(tab1_frame, text=" Generate List Architecture",
            command=on_list_generate, style="Accent.TButton").pack(fill=tk.X, ipady=12)
 notebook.add(tab1_frame, text="  📋 List API  ")
 
 
 # ── Tab 2 — Details API ─────────────────────────────────────────────────────
-default_curl_details = r'''curl ^"https://qapigw.tabadul.sa/tabadul/pmis2/vesselcargo/stowage-instructions/by-crn?crn=20250508000193^" ^
+default_curl_details = r'''curl ^"https://qapigw.tabadul.sa/tabadul/pmis2/vesselcargo/bay-plan/bay-plan-crn?crn=20250507000112^" ^
   -H ^"Accept: application/json, text/plain, */*^" ^
   -H ^"Accept-Language: en^" ^
-  -H ^"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJSMFU3LXVvTnowbThienVlQW1JMVRiYU5HeDNLdVpPWE43a2RncVpXWlQ0In0.eyJleHAiOjE3ODAzMDgzNzIsImlhdCI6MTc4MDMwNjU3MiwiYXV0aF90aW1lIjoxNzgwMzA2NTcwLCJqdGkiOiI4NTIzZmJjNS0xODNjLTQ3M2QtYWFiOC0zMWRkNDUzZTM4Y2IiLCJpc3MiOiJodHRwczovL3EtcG1pczIudGFiYWR1bC5zYS9hdXRoL3JlYWxtcy9QTUlTIiwiYXVkIjpbInJlYWxtLW1hbmFnZW1lbnQiLCJhY2NvdW50Il0sInN1YiI6IjkzMjM2NWU0LTI5NDEtNDI2NC04MjEyLTM4ZTgyMzQzMTU2NiIsInR5cCI6IkJlYXJlciIsImF6cCI6IlBNSVNfY2xpZW50Iiwibm9uY2UiOiJkY2U0YTU2YS05ZGNiLTQ3N2QtYTVkYi03MjY5OWIwMzRjZWEiLCJzZXNzaW9uX3N0YXRlIjoiNzY5NTQ0NGEtN2ZlMC00YWZlLTkzZDYtMzIwNjRiOGVkYTI3IiwiYWxsb3dlZC1vcmlnaW5zIjpbImh0dHBzOi8vcS1wbWlzMi50YWJhZHVsLnNhIiwiaHR0cHM6Ly91LXBtaXMudGFiYWR1bC5zYSJdLCJyZWFsbV9hY2Nlc3MiOnsicm9sZXMiOlsicG1pc3VzZXIiLCJQT0FETSIsIm9mZmxpbmVfYWNjZXNzIiwiZGVmYXVsdC1yb2xlcy1wbWlzIiwidW1hX2F1dGhvcml6YXRpb24iLCJQTyJdfSwicmVzb3VyY2VfYWNjZXNzIjp7InJlYWxtLW1hbmFnZW1lbnQiOnsicm9sZXMiOlsibWFuYWdlLXVzZXJzIiwidmlldy11c2VycyIsInF1ZXJ5LWdyb3VwcyIsInF1ZXJ5LXVzZXJzIl19LCJhY2NvdW50Ijp7InJvbGVzIjpbIm1hbmFnZS1hY2NvdW50IiwibWFuYWdlLWFjY291bnQtbGlua3MiLCJ2aWV3LXByb2ZpbGUiXX19LCJzY29wZSI6Im9wZW5pZCBwcm9maWxlIGVtYWlsIHBtaXN1c2VyIiwic2lkIjoiNzY5NTQ0NGEtN2ZlMC00YWZlLTkzZDYtMzIwNjRiOGVkYTI3IiwiZW1haWxfdmVyaWZpZWQiOmZhbHNlLCJwcmVmZXJyZWRfdXNlcm5hbWUiOiJkYW0wMDEiLCJsb2NhbGUiOiJlbiIsImVtYWlsIjoidGVzdEB0ZXN0LnNhIn0.zI6L-rNcxUkzTJiqy_P2gPhWJKh8txZjqsRbove3z-TzciBDOmNnHE9WAhPwRtNRbaOEO97F8hiCEPhD7Qkj11p7mUzJKyDrIqDRS4mTo23Qn83VARn2jzsbXH5mr34BmNblzM2dF1cD-5mBzSjDdB8oU3jHwHcCQKki7DImNokBtUYiwU8hgU_sYL6Z6Sbsf4pTjyhInXcRbzmY5IjJeaSFhY0PBCnfmBq62oUWgc4253kKos1-HKO0lXlE1P-vn3NRLdiGmrDQfMosfP3frreoqQm016RKFMn9wWpFXgoM_WzKLeSSNGlG2qHQYvIAcqkiH3cfwdV7qoVdxnIBBw^" ^
+  -H ^"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJSMFU3LXVvTnowbThienVlQW1JMVRiYU5HeDNLdVpPWE43a2RncVpXWlQ0In0.eyJleHAiOjE3ODEwMTYzMDUsImlhdCI6MTc4MTAxNDUwNSwiYXV0aF90aW1lIjoxNzgxMDE0NTA0LCJqdGkiOiIzOWQzMmZlYy1iNGJkLTQ3MzUtYmQyNC00Y2JmM2Y4YzdiMDMiLCJpc3MiOiJodHRwczovL3EtcG1pczIudGFiYWR1bC5zYS9hdXRoL3JlYWxtcy9QTUlTIiwiYXVkIjpbInJlYWxtLW1hbmFnZW1lbnQiLCJhY2NvdW50Il0sInN1YiI6IjkzMjM2NWU0LTI5NDEtNDI2NC04MjEyLTM4ZTgyMzQzMTU2NiIsInR5cCI6IkJlYXJlciIsImF6cCI6IlBNSVNfY2xpZW50Iiwibm9uY2UiOiJjN2NkMDI2YS01NDAwLTRkNTEtYmI4Yy05OWEyYTkxMjkwNmMiLCJzZXNzaW9uX3N0YXRlIjoiMWQxYzAzYTItMWM2MC00MzdiLWE3NDYtYzhkNjc2NzVkYzkwIiwiYWxsb3dlZC1vcmlnaW5zIjpbImh0dHBzOi8vcS1wbWlzMi50YWJhZHVsLnNhIiwiaHR0cHM6Ly91LXBtaXMudGFiYWR1bC5zYSJdLCJyZWFsbV9hY2Nlc3MiOnsicm9sZXMiOlsicG1pc3VzZXIiLCJQT0FETSIsIm9mZmxpbmVfYWNjZXNzIiwiZGVmYXVsdC1yb2xlcy1wbWlzIiwidW1hX2F1dGhvcml6YXRpb24iLCJQTyJdfSwicmVzb3VyY2VfYWNjZXNzIjp7InJlYWxtLW1hbmFnZW1lbnQiOnsicm9sZXMiOlsibWFuYWdlLXVzZXJzIiwidmlldy11c2VycyIsInF1ZXJ5LWdyb3VwcyIsInF1ZXJ5LXVzZXJzIl19LCJhY2NvdW50Ijp7InJvbGVzIjpbIm1hbmFnZS1hY2NvdW50IiwibWFuYWdlLWFjY291bnQtbGlua3MiLCJ2aWV3LXByb2ZpbGUiXX19LCJzY29wZSI6Im9wZW5pZCBwcm9maWxlIGVtYWlsIHBtaXN1c2VyIiwic2lkIjoiMWQxYzAzYTItMWM2MC00MzdiLWE3NDYtYzhkNjc2NzVkYzkwIiwiZW1haWxfdmVyaWZpZWQiOmZhbHNlLCJwcmVmZXJyZWRfdXNlcm5hbWUiOiJkYW0wMDEiLCJsb2NhbGUiOiJlbiIsImVtYWlsIjoidGVzdEB0ZXN0LnNhIn0.u2IguGI3mjRutVFF2AsEK2M2U28FlxCQN85505Gu5xgToxaDLtX4dCQ_AZ7oYx8YrntE1Ig-VoX2h0XlLXqDwOikUpzijYPzvL8NRPn-XmrrFrFLhAlYx8bIYudmg1kkLSYW1YTp0gMjif74HfirqyCE4p_gAUK8b073QLjTzrgFEZLt0mRkiM9JJFudaSQZELW8kQxJjvozB7YWPhZriS8JbqOgPsnDkfdFh0GUlyZSAW6HWpkhweKhZIcbwkD4OC2qLnlsUKYMEcRGcMOGZfbWGDFWK8XBNT9pJvo_qgrUXKjEmRWhX49LUYPzHdYH7tOiJg2TYNibktmBNQI14w^" ^
   -H ^"Connection: keep-alive^" ^
   -H ^"Content-Type: text^" ^
   -H ^"Origin: https://q-pmis2.tabadul.sa^" ^
@@ -1100,37 +1105,24 @@ default_curl_details = r'''curl ^"https://qapigw.tabadul.sa/tabadul/pmis2/vessel
   -H ^"sec-ch-ua-platform: ^\^"Windows^\^"^"'''
 
 default_json_details = """{
-    "responseCode": null,
-    "responseMessage": null,
+    "responseCode": 200,
+    "responseMessage": "SUCCESS",
     "data": {
-        "id": 100011,
-        "crn": 20250508000193,
-        "voyageRid": 121874,
-        "filePath": "temp/stowage_instruction",
-        "isDraft": false,
+        "id": 100009,
+        "voyageRid": 121793,
+        "crn": 20250507000112,
+        "filePath": null,
+        "approvalStatusRid": 1,
         "branchId": "lizj",
         "orgId": "nwze0001",
         "portId": 8,
-        "noOfContainers": 1,
-        "vcn": "DAM0121884",
-        "callSign": "1234567",
-        "imoNo": 5616306,
-        "voyageNo": "12",
-        "terminalOperatorCode": 2029,
-        "igmNo": null,
-        "igmDate": null,
-        "rotationNo": null,
-        "countryOfVessel": "Aland Islands",
-        "portOrgName": "SIYANCO SAUDI",
-        "orgName": null,
-        "nationality": 266,
-        "rotationNoDate": null,
-        "expectedDOA": "2025-05-08T22:12",
+        "vcn": "DAM0000914",
         "vesselName": "vesselName English",
-        "shippingAgent": "Adam Yassein",
-        "shippingAgentCode": "nwze0001-123",
+        "imoNo": "8579298",
+        "callSign": "1234567",
+        "voyageNo": "12",
         "status": "Submitted",
-        "totalContainer": 1,
+        "totalContainer": 19,
         "containers": []
     }
 }"""
@@ -1142,7 +1134,7 @@ def on_combined_generate():
     _,         det_json,  det_curl    = get_details_data()
     process_combined_generation(list_name, list_json, list_curl, det_json, det_curl)
 
-ttk.Button(tab2_frame, text="🚀 Generate List + Details Architecture",
+ttk.Button(tab2_frame, text=" Generate List + Details Architecture",
            command=on_combined_generate, style="Accent.TButton").pack(fill=tk.X, ipady=12)
 notebook.add(tab2_frame, text="  🔍 Details API  ")
 
